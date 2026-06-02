@@ -7,6 +7,10 @@ venv/
 # Autoresearch artifacts (local experiment logs)
 results.tsv
 run.log
+val_loss_plot.png
+
+# Secrets
+.env
 
 # Weights & Biases
 wandb/

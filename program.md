@@ -79,6 +79,8 @@ Extract key metrics:
 grep "^val_mse:\|^max_overlap:\|^grok_epoch:" run.log
 ```
 
+After each run, `prepare.py` automatically saves `val_loss_plot.png`, uploads metrics and the plot to **Weights & Biases**, and sends the plot to **Telegram** (requires `WANDB_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` in the environment). The agent does not need to configure this.
+
 ## Logging results
 
 When an experiment is done, append to `results.tsv` (tab-separated, NOT comma-separated).

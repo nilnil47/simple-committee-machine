@@ -6,8 +6,18 @@ Do not modify during autonomous experiments — the agent only edits train.py.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import requests
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -23,6 +33,8 @@ EVAL_EVERY_STEPS = 500
 SEED = 42
 
 CACHE_DIR = Path.home() / ".cache" / "committee-autoresearch"
+WANDB_PROJECT = "committee-autoresearch"
+VAL_LOSS_PLOT_PATH = Path("val_loss_plot.png")
 
 
 def hermite_teacher(x: torch.Tensor, w_star: torch.Tensor) -> torch.Tensor:
@@ -134,6 +146,139 @@ def print_summary(
     print(f"training_seconds: {training_seconds:.1f}")
     print(f"total_seconds:    {total_seconds:.1f}")
     print(f"num_steps:        {num_steps}")
+
+
+def _git_commit_short() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def make_val_loss_plot(val_history: list[tuple[int, float]]) -> plt.Figure:
+    steps, val_mses = zip(*val_history)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(steps, val_mses, color="#2563eb", linewidth=1.5)
+    ax.set_xlabel("Training step")
+    ax.set_ylabel("Validation MSE")
+    ax.set_title("Validation MSE vs Training Step")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def save_val_loss_plot(val_history: list[tuple[int, float]], path: Path) -> Path:
+    fig = make_val_loss_plot(val_history)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def log_to_wandb(
+    metrics: dict[str, float],
+    val_history: list[tuple[int, float]],
+    plot_path: Path,
+    num_steps: int,
+    training_seconds: float,
+) -> None:
+    import wandb
+
+    commit = _git_commit_short()
+    project_name = os.environ.get("WANDB_PROJECT", WANDB_PROJECT)
+    run = wandb.init(
+        project=project_name,
+        config={
+            "dimension": DIMENSION,
+            "n_hidden": N_HIDDEN,
+            "train_samples": TRAIN_SAMPLES,
+            "val_samples": VAL_SAMPLES,
+            "training_seconds_budget": TRAINING_SECONDS,
+            "git_commit": commit,
+        },
+        reinit=True,
+    )
+    wandb.log(
+        {
+            **metrics,
+            "num_steps": num_steps,
+            "training_seconds": training_seconds,
+            "val_loss_curve": wandb.Image(str(plot_path)),
+        }
+    )
+    if val_history:
+        val_table = wandb.Table(
+            columns=["step", "val_mse"],
+            data=[[step, val_mse] for step, val_mse in val_history],
+        )
+        wandb.log({"val_mse_curve": wandb.plot.line(val_table, "step", "val_mse")})
+    run.finish()
+    print(f"Logged run to W&B project '{project_name}'")
+
+
+def send_telegram_val_plot(
+    plot_path: Path,
+    metrics: dict[str, float],
+    num_steps: int,
+    training_seconds: float,
+) -> None:
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    commit = _git_commit_short()
+    caption = (
+        f"Committee autoresearch run ({commit})\n"
+        f"val_mse: {metrics['val_mse']:.4f}\n"
+        f"train_mse: {metrics['train_mse']:.4f}\n"
+        f"max_overlap: {metrics['max_overlap']:.4f}\n"
+        f"grok_epoch: {int(metrics['grok_epoch'])}\n"
+        f"steps: {num_steps} | time: {training_seconds:.0f}s"
+    )
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    with plot_path.open("rb") as plot_file:
+        response = requests.post(
+            url,
+            data={"chat_id": chat_id, "caption": caption},
+            files={"photo": plot_file},
+            timeout=30,
+        )
+    response.raise_for_status()
+    print("Sent validation loss plot to Telegram")
+
+
+def report_run(
+    metrics: dict[str, float],
+    val_history: list[tuple[int, float]],
+    training_seconds: float,
+    total_seconds: float,
+    num_steps: int,
+) -> None:
+    """Print summary, save plot, upload to W&B, and notify Telegram."""
+    print_summary(metrics, training_seconds, total_seconds, num_steps)
+
+    if not val_history:
+        print("No validation history to plot; skipping W&B and Telegram.")
+        return
+
+    plot_path = save_val_loss_plot(val_history, VAL_LOSS_PLOT_PATH)
+    print(f"Saved validation loss plot to {plot_path}")
+
+    try:
+        log_to_wandb(metrics, val_history, plot_path, num_steps, training_seconds)
+    except Exception as exc:
+        print(f"W&B logging skipped: {exc}")
+
+    if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+        try:
+            send_telegram_val_plot(plot_path, metrics, num_steps, training_seconds)
+        except Exception as exc:
+            print(f"Telegram notification failed: {exc}")
+    else:
+        print(
+            "Telegram skipped: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable."
+        )
 
 
 def prepare_data() -> None:
