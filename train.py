@@ -68,6 +68,8 @@ def main() -> None:
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            with torch.no_grad():
+                student.W.data = student.W.data / torch.norm(student.W)
 
             num_steps += 1
 
