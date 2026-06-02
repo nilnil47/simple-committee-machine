@@ -70,7 +70,7 @@ def main() -> None:
             optimizer.step()
             with torch.no_grad():
                 student.W.data = student.W.data / torch.norm(student.W)
-                student.W.data.add_(torch.randn_like(student.W) * 5e-3)
+                student.W.data.add_(torch.randn_like(student.W) * 1e-2)
 
             num_steps += 1
 
