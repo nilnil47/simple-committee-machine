@@ -19,7 +19,7 @@ from prepare import (
     compute_mse,
     evaluate,
     load_data,
-    print_summary,
+    report_run,
 )
 
 
@@ -87,7 +87,7 @@ def main() -> None:
     metrics = evaluate(student, train_loader, val_loader, w_star, device, val_history)
     total_seconds = time.time() - total_t0
 
-    print_summary(metrics, training_seconds, total_seconds, num_steps)
+    report_run(metrics, val_history, training_seconds, total_seconds, num_steps)
 
 
 if __name__ == "__main__":
