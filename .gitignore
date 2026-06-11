@@ -17,3 +17,5 @@ wandb/
 
 # OS
 .DS_Store
+
+connect.sh

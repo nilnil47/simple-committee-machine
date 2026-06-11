@@ -12,6 +12,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+# Empty placeholder in .env must not block credentials from `wandb login`.
+if not (os.environ.get("WANDB_API_KEY") or "").strip():
+    os.environ.pop("WANDB_API_KEY", None)
 
 import matplotlib
 
@@ -28,7 +31,7 @@ N_HIDDEN = 64
 TRAIN_SAMPLES = 512
 VAL_SAMPLES = 10_000
 BATCH_SIZE = 256
-TRAINING_SECONDS = 600  # 10 min wall-clock training budget
+TRAINING_SECONDS = 300  # 5 min wall-clock training budget
 EVAL_EVERY_STEPS = 500
 SEED = 42
 
@@ -178,6 +181,23 @@ def save_val_loss_plot(val_history: list[tuple[int, float]], path: Path) -> Path
     return path
 
 
+def _ensure_wandb_auth() -> None:
+    """Use WANDB_API_KEY from .env when set; otherwise rely on `wandb login`."""
+    import wandb
+
+    api_key = (os.environ.get("WANDB_API_KEY") or "").strip()
+    if api_key:
+        wandb.login(key=api_key, relogin=True)
+        return
+    if os.environ.get("WANDB_MODE") == "offline":
+        return
+    if wandb.api.api_key:
+        return
+    raise RuntimeError(
+        "W&B is not authenticated. Set WANDB_API_KEY in .env or run: wandb login"
+    )
+
+
 def log_to_wandb(
     metrics: dict[str, float],
     val_history: list[tuple[int, float]],
@@ -187,6 +207,7 @@ def log_to_wandb(
 ) -> None:
     import wandb
 
+    _ensure_wandb_auth()
     commit = _git_commit_short()
     project_name = os.environ.get("WANDB_PROJECT", WANDB_PROJECT)
     run = wandb.init(
@@ -268,7 +289,11 @@ def report_run(
     try:
         log_to_wandb(metrics, val_history, plot_path, num_steps, training_seconds)
     except Exception as exc:
-        print(f"W&B logging skipped: {exc}")
+        print(f"W&B logging failed: {exc}")
+        print(
+            "Fix: add WANDB_API_KEY to .env (https://wandb.ai/authorize) "
+            "or run `wandb login`, then re-run train.py."
+        )
 
     if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
         try:

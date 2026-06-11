@@ -35,11 +35,14 @@ TELEGRAM_CHAT_ID=your-chat-id       # from @userinfobot
 
 `prepare.py` loads `.env` automatically when you run `train.py`. The file is gitignored — never commit it.
 
-Test Telegram without a full training run:
+Test integrations without a full training run:
 
 ```bash
+python test_wandb.py
 python test_telegram.py
 ```
+
+If `.env` has `WANDB_API_KEY=` left blank, either remove that line or run `wandb login` — an empty key overrides saved login credentials.
 
 ## How it works
 

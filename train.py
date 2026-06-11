@@ -45,7 +45,7 @@ def main() -> None:
     w_star = w_star.to(device)
 
     student = CommitteeStudent(DIMENSION, N_HIDDEN).to(device)
-    optimizer = optim.Adam(student.parameters(), lr=0.001)
+    optimizer = optim.SGD(student.parameters(), lr=0.001, momentum=0)
     criterion = nn.MSELoss()
 
     val_history: list[tuple[int, float]] = []
