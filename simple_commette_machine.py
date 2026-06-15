@@ -57,14 +57,14 @@ class CommitteeStudent(nn.Module):
         self.W = nn.Parameter(torch.empty(n_hidden, d))
         nn.init.normal_(self.W, 0.0, 1.0 / math.sqrt(d))
         with torch.no_grad():
-            self.W /= torch.norm(self.W)
+            self.W /= torch.norm(self.W, dim=1, keepdim=True)
 
     def forward(self, x):
         return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
 
 
 def ensure_init_weights() -> None:
-    """Sample init once from N(0, 1/sqrt(d)), Frobenius-normalize, cache for all runs."""
+    """Sample init once from N(0, 1/sqrt(d)), per-row unit normalize, cache for all runs."""
     if INIT_WEIGHTS_PATH.exists():
         return
     torch.manual_seed(INIT_SEED)

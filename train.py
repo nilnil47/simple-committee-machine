@@ -36,7 +36,7 @@ class CommitteeStudent(nn.Module):
         self.W = nn.Parameter(torch.empty(n_hidden, d))
         nn.init.normal_(self.W, mean=0.0, std=1.0 / math.sqrt(d))
         with torch.no_grad():
-            self.W.data = self.W.data / torch.norm(self.W)
+            self.W.data /= torch.norm(self.W, dim=1, keepdim=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = torch.erf(x @ self.W.T)
