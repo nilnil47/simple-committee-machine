@@ -12,7 +12,7 @@ import wandb
 DIMENSION = 10
 N_HIDDEN = 32
 LR = 0.001
-EPOCHS = 10_000
+EPOCHS = 100_000
 SEED = 42
 INIT_SEED = 42
 
@@ -30,6 +30,10 @@ CHECKPOINT_DIR = CACHE / "checkpoints"
 # 1-indexed epochs at which to save student weights; None = final checkpoint only
 SAVE_EPOCHS: list[int] | None = [500]
 
+# Teacher target: "linear" (w*·x) or "hermite" (He_3(w*·x))
+# TASK = "linear"
+TASK = "hermite"
+
 # None = start from saved init; "trained" = load TRAINED_WEIGHTS_PATH; or any .pt path
 LOAD_FROM = CACHE / "student_init.pt"
 # LOAD_FROM = CACHE / "student_trained_linear.pt"
@@ -39,8 +43,11 @@ LOAD_FROM = CACHE / "student_init.pt"
 
 def teacher(x, w):
     z = x @ w
-    return z.squeeze()
-    # return (z**3 - 3 * z).squeeze()
+    if TASK == "linear":
+        return z.squeeze()
+    if TASK == "hermite":
+        return (z**3 - 3 * z).squeeze()
+    raise ValueError(f"Unknown task: {TASK!r} (expected 'linear' or 'hermite')")
 
 
 class CommitteeStudent(nn.Module):
@@ -152,6 +159,7 @@ if __name__ == "__main__":
     wandb.init(
         project="hermite-distillation",
         config={
+            "task": TASK,
             "dimension": DIMENSION,
             "n_hidden": N_HIDDEN,
             "lr": LR,
