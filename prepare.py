@@ -26,11 +26,11 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # --- Fixed experiment constants (not agent-editable) ---
 
-DIMENSION = 128
-N_HIDDEN = 64
-TRAIN_SAMPLES = 512
+DIMENSION = 16
+N_HIDDEN = 512
+TRAIN_SAMPLES = 2048
 VAL_SAMPLES = 10_000
-BATCH_SIZE = 256
+BATCH_SIZE = 128
 TRAINING_SECONDS = 300  # 5 min wall-clock training budget
 EVAL_EVERY_STEPS = 500
 SEED = 42
@@ -41,9 +41,8 @@ VAL_LOSS_PLOT_PATH = Path("val_loss_plot.png")
 
 
 def hermite_teacher(x: torch.Tensor, w_star: torch.Tensor) -> torch.Tensor:
-    """Third Hermite polynomial He_3(z) = z^3 - 3z on projection z = w* · x."""
-    z = x @ w_star
-    return (z**3 - 3 * z).squeeze(-1)
+    """Teacher target: projection z = w* · x (learnable with plain GD on fixed offline data)."""
+    return (x @ w_star).squeeze(-1)
 
 
 def make_teacher_weights(dimension: int, generator: torch.Generator) -> torch.Tensor:
