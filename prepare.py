@@ -30,7 +30,7 @@ DIMENSION = 16
 TRAIN_SAMPLES = 2048
 VAL_SAMPLES = 10_000
 BATCH_SIZE = 128
-TRAINING_SECONDS = 300  # 5 min wall-clock training budget
+TRAINING_SECONDS = 60  # 1 min wall-clock training budget
 EVAL_EVERY_STEPS = 500
 SEED = 42
 

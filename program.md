@@ -21,7 +21,7 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment runs for a **fixed wall-clock training budget of 5 minutes** (`TRAINING_SECONDS = 300` in `prepare.py`). Launch with:
+Each experiment runs for a **fixed wall-clock training budget of 1 minute** (`TRAINING_SECONDS = 60` in `prepare.py`). Launch with:
 
 ```bash
 python train.py > run.log 2>&1
@@ -38,7 +38,7 @@ python train.py > run.log 2>&1
 
 ## Goal
 
-**Minimize `val_mse` (validation MSE) within the 5-minute training budget.** Lower is better.
+**Minimize `val_mse` (validation MSE) within the 1-minute training budget.** Lower is better.
 
 Generalization matters — we are not optimizing train loss alone. A change that lowers train MSE but raises val MSE should be discarded.
 
@@ -59,7 +59,7 @@ max_overlap:      0.842100
 mean_overlap:     0.123456
 grok_epoch:       8420
 plateau_length:   120
-training_seconds: 300.2
+training_seconds: 60.2
 total_seconds:    312.5
 num_steps:        24000
 ```
@@ -118,7 +118,7 @@ LOOP FOREVER:
 8. If `val_mse` improved (lower), keep the commit (branch advances).
 9. If `val_mse` equal or worse, `git reset` back to previous best.
 
-**Timeout**: Each experiment should take ~5 minutes (+ eval overhead). If a run exceeds 8 minutes, kill it and treat as failure.
+**Timeout**: Each experiment should take ~1 minute (+ eval overhead). If a run exceeds 2 minutes, kill it and treat as failure.
 
 **Crashes**: Fix typos and retry. If the idea is fundamentally broken, log `crash` and move on.
 
@@ -133,6 +133,6 @@ LOOP FOREVER:
 - **Readout** — weighted sum vs mean; learnable readout weights.
 - **Activation** — erf is fixed in problem but agent could try soft approximations (stay smooth).
 - **Init scale** — affects early convergence speed and final val_mse.
-- **Committee width (`N_HIDDEN`)** — trade capacity vs compute within the 5-minute budget; wider nets use more memory and may take fewer steps.
+- **Committee width (`N_HIDDEN`)** — trade capacity vs compute within the 1-minute budget; wider nets use more memory and may take fewer steps.
 
 Remember: `DIMENSION`, `TRAIN_SAMPLES`, and `VAL_SAMPLES` are in `prepare.py`. To change problem scale, the human must retune `prepare.py` between research campaigns — do not modify it yourself.
