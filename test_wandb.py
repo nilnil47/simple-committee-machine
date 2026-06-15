@@ -25,7 +25,7 @@ def main() -> None:
         "plateau_length": 0.0,
     }
     try:
-        log_to_wandb(metrics, val_history, plot_path, 1000, 1.0)
+        log_to_wandb(metrics, val_history, 1000, 1.0, 512)
     except Exception as exc:
         print(f"W&B test failed: {exc}")
         print(

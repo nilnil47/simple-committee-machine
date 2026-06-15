@@ -1,4 +1,4 @@
-"""Committee student on Hermite teacher He_3(w*·x). Offline data, full-batch SGD."""
+"""Committee student on linear teacher w*·x. Offline data, full-batch SGD."""
 
 import math
 from pathlib import Path
@@ -13,6 +13,7 @@ N_HIDDEN = 32
 LR = 0.001
 EPOCHS = 10_000
 SEED = 42
+INIT_SEED = 42
 
 N_TRAIN_TOTAL = 1000
 N_TEST_TOTAL = 1000
@@ -20,6 +21,11 @@ N_TRAIN_USED = 100
 N_TEST_USED = 200
 
 CACHE = Path.home() / ".cache" / "simple-committee-machine"
+INIT_WEIGHTS_PATH = CACHE / "student_init.pt"
+TRAINED_WEIGHTS_PATH = CACHE / "student_trained.pt"
+
+# None = start from saved init; "trained" = load TRAINED_WEIGHTS_PATH; or any .pt path
+LOAD_FROM = None
 
 
 def teacher(x, w):
@@ -41,8 +47,36 @@ class CommitteeStudent(nn.Module):
         return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
 
 
+def ensure_init_weights() -> None:
+    """Sample init once from N(0, 1/sqrt(d)), Frobenius-normalize, cache for all runs."""
+    if INIT_WEIGHTS_PATH.exists():
+        return
+    torch.manual_seed(INIT_SEED)
+    student = CommitteeStudent(DIMENSION, N_HIDDEN)
+    torch.save(student.state_dict(), INIT_WEIGHTS_PATH)
+    print(f"Saved init weights to {INIT_WEIGHTS_PATH}")
+
+
+def resolve_checkpoint(load_from: str | None) -> Path:
+    if load_from is None:
+        return INIT_WEIGHTS_PATH
+    if load_from == "trained":
+        return TRAINED_WEIGHTS_PATH
+    return Path(load_from)
+
+
+def load_student(load_from: str | None) -> tuple[CommitteeStudent, Path]:
+    ensure_init_weights()
+    student = CommitteeStudent(DIMENSION, N_HIDDEN)
+    path = resolve_checkpoint(load_from)
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    student.load_state_dict(torch.load(path, weights_only=True))
+    print(f"Loaded weights from {path}")
+    return student, path
+
+
 if __name__ == "__main__":
-    # fixed offline data (generated once, then cached)
     CACHE.mkdir(parents=True, exist_ok=True)
     if (CACHE / "x_train.pt").exists():
         w_star = torch.load(CACHE / "w_star.pt", weights_only=True)
@@ -63,6 +97,8 @@ if __name__ == "__main__":
     y_train = teacher(x_train, w_star)
     y_test = teacher(x_test, w_star)
 
+    student, loaded_from = load_student(LOAD_FROM)
+
     wandb.init(
         project="hermite-distillation",
         config={
@@ -72,9 +108,10 @@ if __name__ == "__main__":
             "epochs": EPOCHS,
             "n_train_used": N_TRAIN_USED,
             "n_test_used": N_TEST_USED,
+            "init_seed": INIT_SEED,
+            "loaded_from": str(loaded_from),
         },
     )
-    student = CommitteeStudent(DIMENSION, N_HIDDEN)
     optimizer = optim.SGD(student.parameters(), lr=LR, momentum=0)
     loss_fn = nn.MSELoss()
 
@@ -92,4 +129,6 @@ if __name__ == "__main__":
         if (epoch + 1) % 1000 == 0:
             print(f"epoch {epoch + 1}: train={loss.item():.4f} test={test_loss:.4f}")
 
+    torch.save(student.state_dict(), TRAINED_WEIGHTS_PATH)
+    print(f"Saved trained weights to {TRAINED_WEIGHTS_PATH}")
     wandb.finish()

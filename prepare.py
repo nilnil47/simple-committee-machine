@@ -199,7 +199,6 @@ def _ensure_wandb_auth() -> None:
 def log_to_wandb(
     metrics: dict[str, float],
     val_history: list[tuple[int, float]],
-    plot_path: Path,
     num_steps: int,
     training_seconds: float,
     n_hidden: int,
@@ -221,20 +220,22 @@ def log_to_wandb(
         },
         reinit=True,
     )
+    for step, val_mse in val_history:
+        wandb.log({"val_mse": val_mse}, step=step)
     wandb.log(
         {
-            **metrics,
+            "val_mse": metrics["val_mse"],
+            "train_mse": metrics["train_mse"],
+            "train_val_gap": metrics["train_val_gap"],
+            "max_overlap": metrics["max_overlap"],
+            "mean_overlap": metrics["mean_overlap"],
+            "grok_epoch": metrics["grok_epoch"],
+            "plateau_length": metrics["plateau_length"],
             "num_steps": num_steps,
             "training_seconds": training_seconds,
-            "val_loss_curve": wandb.Image(str(plot_path)),
-        }
+        },
+        step=num_steps,
     )
-    if val_history:
-        val_table = wandb.Table(
-            columns=["step", "val_mse"],
-            data=[[step, val_mse] for step, val_mse in val_history],
-        )
-        wandb.log({"val_mse_curve": wandb.plot.line(val_table, "step", "val_mse")})
     run.finish()
     print(f"Logged run to W&B project '{project_name}'")
 
@@ -288,7 +289,7 @@ def report_run(
 
     try:
         log_to_wandb(
-            metrics, val_history, plot_path, num_steps, training_seconds, n_hidden
+            metrics, val_history, num_steps, training_seconds, n_hidden
         )
     except Exception as exc:
         print(f"W&B logging failed: {exc}")
