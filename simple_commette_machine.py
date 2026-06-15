@@ -25,17 +25,22 @@ CACHE = Path(".cache").parent / "simple-committee-machine"
 INIT_WEIGHTS_PATH = CACHE / "student_init.pt"
 TRAINED_WEIGHTS_PATH = CACHE / "student_trained.pt"
 LOSS_LOGLOG_PLOT_PATH = CACHE / "loss_loglog.png"
+CHECKPOINT_DIR = CACHE / "checkpoints"
+
+# 1-indexed epochs at which to save student weights; None = final checkpoint only
+SAVE_EPOCHS: list[int] | None = [500]
 
 # None = start from saved init; "trained" = load TRAINED_WEIGHTS_PATH; or any .pt path
-# LOAD_FROM = CACHE / "student_init.pt"
-LOAD_FROM = CACHE / "student_trained_linear.pt"
+LOAD_FROM = CACHE / "student_init.pt"
+# LOAD_FROM = CACHE / "student_trained_linear.pt"
+# LOAD_FROM = CACHE / "checkpoints" / "student_epoch_00500.pt"
 # LOAD_FROM = None
 
 
 def teacher(x, w):
     z = x @ w
-    # return z.squeeze()
-    return (z**3 - 3 * z).squeeze()
+    return z.squeeze()
+    # return (z**3 - 3 * z).squeeze()
 
 
 class CommitteeStudent(nn.Module):
@@ -78,6 +83,22 @@ def load_student(load_from: str | None) -> tuple[CommitteeStudent, Path]:
     student.load_state_dict(torch.load(path, weights_only=True))
     print(f"Loaded weights from {path}")
     return student, path
+
+
+def checkpoint_path(epoch: int) -> Path:
+    """Path for a 1-indexed training epoch checkpoint."""
+    return CHECKPOINT_DIR / f"student_epoch_{epoch:06d}.pt"
+
+
+def save_student_checkpoint(
+    student: CommitteeStudent, epoch: int, path: Path | None = None
+) -> Path:
+    """Save student weights at the given 1-indexed epoch."""
+    path = path or checkpoint_path(epoch)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(student.state_dict(), path)
+    print(f"Saved checkpoint at epoch {epoch} to {path}")
+    return path
 
 
 def save_loss_loglog_plot(
@@ -139,8 +160,10 @@ if __name__ == "__main__":
             "n_test_used": N_TEST_USED,
             "init_seed": INIT_SEED,
             "loaded_from": str(loaded_from),
+            "save_epochs": SAVE_EPOCHS,
         },
     )
+    save_epochs = set(SAVE_EPOCHS or ())
     optimizer = optim.SGD(student.parameters(), lr=LR, momentum=0)
     loss_fn = nn.MSELoss()
     epochs_hist: list[int] = []
@@ -162,8 +185,12 @@ if __name__ == "__main__":
         test_loss_hist.append(test_loss)
         wandb.log({"epoch": epoch, "loss": loss.item(), "test_loss": test_loss})
 
-        if (epoch + 1) % 1000 == 0:
-            print(f"epoch {epoch + 1}: train={loss.item():.4f} test={test_loss:.4f}")
+        epoch_num = epoch + 1
+        if epoch_num in save_epochs:
+            save_student_checkpoint(student, epoch_num)
+
+        if epoch_num % 1000 == 0:
+            print(f"epoch {epoch_num}: train={loss.item():.4f} test={test_loss:.4f}")
 
     plot_path = save_loss_loglog_plot(
         epochs_hist, train_loss_hist, test_loss_hist, LOSS_LOGLOG_PLOT_PATH
