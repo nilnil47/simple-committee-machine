@@ -18,7 +18,6 @@ from prepare import (
     BATCH_SIZE,
     DIMENSION,
     EVAL_EVERY_STEPS,
-    N_HIDDEN,
     TRAINING_SECONDS,
     compute_mse,
     evaluate,
@@ -26,6 +25,7 @@ from prepare import (
     report_run,
 )
 
+N_HIDDEN = 512
 LEARNING_RATE = 0.15
 
 
@@ -93,7 +93,9 @@ def main() -> None:
     metrics = evaluate(student, train_loader, val_loader, w_star, device, val_history)
     total_seconds = time.time() - total_t0
 
-    report_run(metrics, val_history, training_seconds, total_seconds, num_steps)
+    report_run(
+        metrics, val_history, training_seconds, total_seconds, num_steps, N_HIDDEN
+    )
 
 
 if __name__ == "__main__":

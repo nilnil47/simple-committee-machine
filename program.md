@@ -28,7 +28,7 @@ python train.py > run.log 2>&1
 ```
 
 **What you CAN do:**
-- Modify `train.py` only — architecture, hyperparameters, training loop, init, readout, weight constraints, Langevin noise, LR schedules, etc.
+- Modify `train.py` only — architecture, hyperparameters, training loop, init, readout, weight constraints, Langevin noise, LR schedules, committee width (`N_HIDDEN`), etc.
 
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only: fixed teacher, train/val splits, evaluation metrics, time budget, and data constants.
@@ -133,5 +133,6 @@ LOOP FOREVER:
 - **Readout** — weighted sum vs mean; learnable readout weights.
 - **Activation** — erf is fixed in problem but agent could try soft approximations (stay smooth).
 - **Init scale** — affects early convergence speed and final val_mse.
+- **Committee width (`N_HIDDEN`)** — trade capacity vs compute within the 5-minute budget; wider nets use more memory and may take fewer steps.
 
-Remember: `dimension`, `TRAIN_SAMPLES`, and `VAL_SAMPLES` are in `prepare.py`. To change problem scale, the human must retune `prepare.py` between research campaigns — do not modify it yourself.
+Remember: `DIMENSION`, `TRAIN_SAMPLES`, and `VAL_SAMPLES` are in `prepare.py`. To change problem scale, the human must retune `prepare.py` between research campaigns — do not modify it yourself.

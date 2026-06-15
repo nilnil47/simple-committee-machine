@@ -27,7 +27,6 @@ from torch.utils.data import DataLoader, TensorDataset
 # --- Fixed experiment constants (not agent-editable) ---
 
 DIMENSION = 16
-N_HIDDEN = 512
 TRAIN_SAMPLES = 2048
 VAL_SAMPLES = 10_000
 BATCH_SIZE = 128
@@ -203,6 +202,7 @@ def log_to_wandb(
     plot_path: Path,
     num_steps: int,
     training_seconds: float,
+    n_hidden: int,
 ) -> None:
     import wandb
 
@@ -213,7 +213,7 @@ def log_to_wandb(
         project=project_name,
         config={
             "dimension": DIMENSION,
-            "n_hidden": N_HIDDEN,
+            "n_hidden": n_hidden,
             "train_samples": TRAIN_SAMPLES,
             "val_samples": VAL_SAMPLES,
             "training_seconds_budget": TRAINING_SECONDS,
@@ -274,6 +274,7 @@ def report_run(
     training_seconds: float,
     total_seconds: float,
     num_steps: int,
+    n_hidden: int,
 ) -> None:
     """Print summary, save plot, upload to W&B, and notify Telegram."""
     print_summary(metrics, training_seconds, total_seconds, num_steps)
@@ -286,7 +287,9 @@ def report_run(
     print(f"Saved validation loss plot to {plot_path}")
 
     try:
-        log_to_wandb(metrics, val_history, plot_path, num_steps, training_seconds)
+        log_to_wandb(
+            metrics, val_history, plot_path, num_steps, training_seconds, n_hidden
+        )
     except Exception as exc:
         print(f"W&B logging failed: {exc}")
         print(
