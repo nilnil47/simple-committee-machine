@@ -9,13 +9,19 @@ We measure std across independent dataset redraws at each P (fixed student + tea
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn as nn
+
+from simple_commette_machine import (
+    CommitteeStudent,
+    empirical_cross_gradient,
+    make_student,
+    make_teacher_weights,
+    teacher,
+)
 
 # --- experiment knobs ---
 DIMENSION = 30
@@ -23,47 +29,17 @@ N_HIDDEN = 32
 INIT_SEED = 42
 P_VALUES = [50, 100, 200, 500, 1000, 2000, 5000, 10000]
 REPEATS_PER_P = 80
-TASK = "hermite"
 
 OUTPUT_DIR = Path("simple-committee-machine")
 PLOT_PATH = OUTPUT_DIR / "validation_finite_sample_noise.png"
 
 
-def hermite_teacher(x: torch.Tensor, w_star: torch.Tensor) -> torch.Tensor:
-    z = (x @ w_star).squeeze(-1)
-    return z**3 - 3 * z
-
-
-class CommitteeStudent(nn.Module):
-    def __init__(self, d: int, n_hidden: int) -> None:
-        super().__init__()
-        self.scale = 1.0 / math.sqrt(n_hidden)
-        self.W = nn.Parameter(torch.empty(n_hidden, d))
-        nn.init.normal_(self.W, 0.0, 1.0 / math.sqrt(d))
-        with torch.no_grad():
-            self.W /= torch.norm(self.W, dim=1, keepdim=True)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
-
-
-def empirical_cross_gradient(
-    student: CommitteeStudent, x: torch.Tensor, y: torch.Tensor
-) -> torch.Tensor:
-    """Gradient of mean(y * f(x)) = (1/P) sum_p y_p grad f(x_p)."""
-    student.zero_grad()
-    loss = (y * student(x)).mean()
-    loss.backward()
-    return student.W.grad.detach().clone()
-
-
-def init_student_and_teacher(d: int, n_hidden: int, seed: int) -> tuple[CommitteeStudent, torch.Tensor]:
+def init_student_and_teacher(
+    d: int, n_hidden: int, seed: int
+) -> tuple[CommitteeStudent, torch.Tensor]:
     gen = torch.Generator().manual_seed(seed)
-    w_star = torch.randn(d, 1, generator=gen)
-    w_star /= torch.norm(w_star)
-
-    torch.manual_seed(seed)
-    student = CommitteeStudent(d, n_hidden)
+    w_star = make_teacher_weights(d, gen)
+    student = make_student(d, n_hidden, seed)
     return student, w_star
 
 
@@ -82,7 +58,7 @@ def std_across_redraws(
     for repeat in range(repeats):
         gen = torch.Generator().manual_seed(P * 1_000_003 + repeat)
         x = torch.randn(P, d, generator=gen)
-        y = hermite_teacher(x, w_star)
+        y = teacher(x, w_star)
 
         student_template.load_state_dict(student_state)
         grad = empirical_cross_gradient(student_template, x, y)
@@ -97,11 +73,11 @@ def std_across_redraws(
 
 
 def fit_loglog_slope(x: np.ndarray, y: np.ndarray) -> float:
-  """Fit log(y) = slope * log(x) + intercept; return slope."""
-  log_x = np.log(x)
-  log_y = np.log(y)
-  slope, _ = np.polyfit(log_x, log_y, 1)
-  return float(slope)
+    """Fit log(y) = slope * log(x) + intercept; return slope."""
+    log_x = np.log(x)
+    log_y = np.log(y)
+    slope, _ = np.polyfit(log_x, log_y, 1)
+    return float(slope)
 
 
 def main() -> None:

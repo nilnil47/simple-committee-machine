@@ -63,6 +63,26 @@ class CommitteeStudent(nn.Module):
         return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
 
 
+def make_teacher_weights(dimension: int, generator: torch.Generator) -> torch.Tensor:
+    w_star = torch.randn(dimension, 1, generator=generator)
+    return w_star / torch.norm(w_star)
+
+
+def make_student(dimension: int, n_hidden: int, seed: int) -> CommitteeStudent:
+    torch.manual_seed(seed)
+    return CommitteeStudent(dimension, n_hidden)
+
+
+def empirical_cross_gradient(
+    student: CommitteeStudent, x: torch.Tensor, y: torch.Tensor
+) -> torch.Tensor:
+    """Gradient of mean(y * f(x)) = (1/P) sum_p y_p grad f(x_p)."""
+    student.zero_grad()
+    loss = (y * student(x)).mean()
+    loss.backward()
+    return student.W.grad.detach().clone()
+
+
 def ensure_init_weights() -> None:
     """Sample init once from N(0, 1/sqrt(d)), per-row unit normalize, cache for all runs."""
     if INIT_WEIGHTS_PATH.exists():
@@ -141,8 +161,7 @@ if __name__ == "__main__":
         x_test = torch.load(CACHE / "x_test.pt", weights_only=True)
     else:
         g = torch.Generator().manual_seed(SEED)
-        w_star = torch.randn(DIMENSION, 1, generator=g)
-        w_star /= torch.norm(w_star)
+        w_star = make_teacher_weights(DIMENSION, g)
         x_train = torch.randn(N_TRAIN_TOTAL, DIMENSION, generator=g)
         x_test = torch.randn(N_TEST_TOTAL, DIMENSION, generator=g)
         torch.save(w_star, CACHE / "w_star.pt")
