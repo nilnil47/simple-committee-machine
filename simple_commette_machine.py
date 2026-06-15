@@ -3,6 +3,7 @@
 import math
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,18 +21,21 @@ N_TEST_TOTAL = 1000
 N_TRAIN_USED = 100
 N_TEST_USED = 200
 
-CACHE = Path.home() / ".cache" / "simple-committee-machine"
+CACHE = Path(".cache").parent / "simple-committee-machine"
 INIT_WEIGHTS_PATH = CACHE / "student_init.pt"
 TRAINED_WEIGHTS_PATH = CACHE / "student_trained.pt"
+LOSS_LOGLOG_PLOT_PATH = CACHE / "loss_loglog.png"
 
 # None = start from saved init; "trained" = load TRAINED_WEIGHTS_PATH; or any .pt path
-LOAD_FROM = None
+# LOAD_FROM = CACHE / "student_init.pt"
+LOAD_FROM = CACHE / "student_trained_linear.pt"
+# LOAD_FROM = None
 
 
 def teacher(x, w):
     z = x @ w
-    return z.squeeze()
-    # return (z**3 - 3 * z).squeeze()
+    # return z.squeeze()
+    return (z**3 - 3 * z).squeeze()
 
 
 class CommitteeStudent(nn.Module):
@@ -76,6 +80,31 @@ def load_student(load_from: str | None) -> tuple[CommitteeStudent, Path]:
     return student, path
 
 
+def save_loss_loglog_plot(
+    epochs: list[int],
+    train_losses: list[float],
+    test_losses: list[float],
+    path: Path,
+) -> Path:
+    eps = 1e-12
+    x = [e + 1 for e in epochs]
+    train_y = [max(v, eps) for v in train_losses]
+    test_y = [max(v, eps) for v in test_losses]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.loglog(x, train_y, label="train loss", linewidth=1.5)
+    ax.loglog(x, test_y, label="test loss", linewidth=1.5)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("MSE")
+    ax.legend()
+    ax.grid(True, which="both", alpha=0.3)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
 if __name__ == "__main__":
     CACHE.mkdir(parents=True, exist_ok=True)
     if (CACHE / "x_train.pt").exists():
@@ -114,6 +143,9 @@ if __name__ == "__main__":
     )
     optimizer = optim.SGD(student.parameters(), lr=LR, momentum=0)
     loss_fn = nn.MSELoss()
+    epochs_hist: list[int] = []
+    train_loss_hist: list[float] = []
+    test_loss_hist: list[float] = []
 
     for epoch in range(EPOCHS):
         student.train()
@@ -124,10 +156,20 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             test_loss = loss_fn(student(x_test), y_test).item()
+
+        epochs_hist.append(epoch)
+        train_loss_hist.append(loss.item())
+        test_loss_hist.append(test_loss)
         wandb.log({"epoch": epoch, "loss": loss.item(), "test_loss": test_loss})
 
         if (epoch + 1) % 1000 == 0:
             print(f"epoch {epoch + 1}: train={loss.item():.4f} test={test_loss:.4f}")
+
+    plot_path = save_loss_loglog_plot(
+        epochs_hist, train_loss_hist, test_loss_hist, LOSS_LOGLOG_PLOT_PATH
+    )
+    print(f"Saved log-log loss plot to {plot_path}")
+    wandb.log({"loss_loglog": wandb.Image(str(plot_path))})
 
     torch.save(student.state_dict(), TRAINED_WEIGHTS_PATH)
     print(f"Saved trained weights to {TRAINED_WEIGHTS_PATH}")
