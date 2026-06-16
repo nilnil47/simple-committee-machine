@@ -19,7 +19,7 @@ INIT_SEED = 42
 N_TRAIN_TOTAL = 1000
 N_TEST_TOTAL = 1000
 N_TRAIN_USED = 100
-N_TEST_USED = 200
+N_TEST_USED = 100
 
 CACHE = Path(".cache").parent / "simple-committee-machine"
 INIT_WEIGHTS_PATH = CACHE / "student_init.pt"
@@ -128,11 +128,47 @@ def save_student_checkpoint(
     return path
 
 
+def erf_nngp_kernel(x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+    """NNGP kernel for the erf committee at init (infinite width, unit-sphere weights).
+
+    K(x, x') = (2/pi) arcsin(2 rho / 3) with rho = cos angle between x and x'.
+    """
+    eps = 1e-12
+    x1_norm = x1.norm(dim=-1, keepdim=True).clamp_min(eps)
+    x2_norm = x2.norm(dim=-1, keepdim=True).clamp_min(eps)
+    rho = (x1 @ x2.T) / (x1_norm @ x2_norm.T)
+    rho = rho.clamp(-1.0 + eps, 1.0 - eps)
+    return (2.0 / math.pi) * torch.asin(2.0 * rho / 3.0)
+
+
+def nngp_regression_mse(
+    x_train: torch.Tensor,
+    y_train: torch.Tensor,
+    x_eval: torch.Tensor,
+    y_eval: torch.Tensor,
+    jitter: float = 1e-6,
+) -> tuple[float, torch.Tensor]:
+    """Exact GP regression with the erf NNGP kernel; returns (MSE, predictions)."""
+    k_train = erf_nngp_kernel(x_train, x_train)
+    k_train = k_train + jitter * torch.eye(k_train.shape[0], dtype=k_train.dtype)
+    k_eval_train = erf_nngp_kernel(x_eval, x_train)
+    alpha = torch.linalg.solve(k_train, y_train)
+    y_pred = k_eval_train @ alpha
+    mse = ((y_pred - y_eval) ** 2).mean().item()
+    return mse, y_pred
+
+
+def teacher_prior_mse(y: torch.Tensor) -> float:
+    """MSE of the zero predictor (NNGP prior mean) against teacher targets."""
+    return (y**2).mean().item()
+
+
 def save_loss_loglog_plot(
     epochs: list[int],
     train_losses: list[float],
     test_losses: list[float],
     path: Path,
+    nngp_test_mse: float | None = None,
 ) -> Path:
     eps = 1e-12
     x = [e + 1 for e in epochs]
@@ -142,6 +178,14 @@ def save_loss_loglog_plot(
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.loglog(x, train_y, label="train loss", linewidth=1.5)
     ax.loglog(x, test_y, label="test loss", linewidth=1.5)
+    if nngp_test_mse is not None:
+        ax.axhline(
+            max(nngp_test_mse, eps),
+            color="C2",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"NNGP test MSE ({nngp_test_mse:.4f})",
+        )
     ax.set_xlabel("epoch")
     ax.set_ylabel("MSE")
     ax.legend()
@@ -173,6 +217,14 @@ if __name__ == "__main__":
     y_train = teacher(x_train, w_star)
     y_test = teacher(x_test, w_star)
 
+    nngp_train_mse, _ = nngp_regression_mse(x_train, y_train, x_train, y_train)
+    nngp_test_mse, _ = nngp_regression_mse(x_train, y_train, x_test, y_test)
+    prior_test_mse = teacher_prior_mse(y_test)
+    print(
+        f"NNGP baselines: prior_test_mse={prior_test_mse:.4f} "
+        f"nngp_train_mse={nngp_train_mse:.4f} nngp_test_mse={nngp_test_mse:.4f}"
+    )
+
     student, loaded_from = load_student(LOAD_FROM)
 
     wandb.init(
@@ -188,7 +240,17 @@ if __name__ == "__main__":
             "init_seed": INIT_SEED,
             "loaded_from": str(loaded_from),
             "save_epochs": SAVE_EPOCHS,
+            "nngp_test_mse": nngp_test_mse,
+            "nngp_train_mse": nngp_train_mse,
+            "prior_test_mse": prior_test_mse,
         },
+    )
+    wandb.log(
+        {
+            "nngp_test_mse": nngp_test_mse,
+            "nngp_train_mse": nngp_train_mse,
+            "prior_test_mse": prior_test_mse,
+        }
     )
     save_epochs = set(SAVE_EPOCHS or ())
     optimizer = optim.SGD(student.parameters(), lr=LR, momentum=0)
@@ -216,6 +278,7 @@ if __name__ == "__main__":
                 "epoch": epoch,
                 "loss": loss.item(),
                 "test_loss": test_loss,
+                "test_loss_minus_nngp": test_loss - nngp_test_mse,
                 "grad_norm": grad_norm,
             }
         )
@@ -228,7 +291,11 @@ if __name__ == "__main__":
             print(f"epoch {epoch_num}: train={loss.item():.4f} test={test_loss:.4f}")
 
     plot_path = save_loss_loglog_plot(
-        epochs_hist, train_loss_hist, test_loss_hist, LOSS_LOGLOG_PLOT_PATH
+        epochs_hist,
+        train_loss_hist,
+        test_loss_hist,
+        LOSS_LOGLOG_PLOT_PATH,
+        nngp_test_mse=nngp_test_mse,
     )
     print(f"Saved log-log loss plot to {plot_path}")
     wandb.log({"loss_loglog": wandb.Image(str(plot_path))})
