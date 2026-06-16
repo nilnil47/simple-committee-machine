@@ -202,6 +202,7 @@ if __name__ == "__main__":
         loss = loss_fn(student(x_train), y_train)
         optimizer.zero_grad()
         loss.backward()
+        grad_norm = student.W.grad.pow(2).sum().item()
         optimizer.step()
 
         with torch.no_grad():
@@ -210,7 +211,14 @@ if __name__ == "__main__":
         epochs_hist.append(epoch)
         train_loss_hist.append(loss.item())
         test_loss_hist.append(test_loss)
-        wandb.log({"epoch": epoch, "loss": loss.item(), "test_loss": test_loss})
+        wandb.log(
+            {
+                "epoch": epoch,
+                "loss": loss.item(),
+                "test_loss": test_loss,
+                "grad_norm": grad_norm,
+            }
+        )
 
         epoch_num = epoch + 1
         if epoch_num in save_epochs:
