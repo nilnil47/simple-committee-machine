@@ -12,7 +12,7 @@ import wandb
 DIMENSION = 10
 N_HIDDEN = 32
 LR = 0.001
-EPOCHS = 100_000
+EPOCHS = 10_000
 SEED = 42
 INIT_SEED = 42
 
@@ -240,18 +240,20 @@ if __name__ == "__main__":
             "init_seed": INIT_SEED,
             "loaded_from": str(loaded_from),
             "save_epochs": SAVE_EPOCHS,
-            "nngp_test_mse": nngp_test_mse,
-            "nngp_train_mse": nngp_train_mse,
-            "prior_test_mse": prior_test_mse,
         },
     )
-    wandb.log(
+    wandb.run.summary.update(
         {
-            "nngp_test_mse": nngp_test_mse,
-            "nngp_train_mse": nngp_train_mse,
             "prior_test_mse": prior_test_mse,
+            "nngp_train_mse": nngp_train_mse,
+            "nngp_test_mse": nngp_test_mse,
         }
     )
+    wandb.define_metric("epoch")
+    wandb.define_metric("test_loss", step_metric="epoch")
+    wandb.define_metric("loss", step_metric="epoch")
+    wandb.define_metric("grad_norm", step_metric="epoch")
+    wandb.define_metric("test_loss_minus_nngp", step_metric="epoch")
     save_epochs = set(SAVE_EPOCHS or ())
     optimizer = optim.SGD(student.parameters(), lr=LR, momentum=0)
     loss_fn = nn.MSELoss()
@@ -284,6 +286,7 @@ if __name__ == "__main__":
         )
 
         epoch_num = epoch + 1
+
         if epoch_num in save_epochs:
             save_student_checkpoint(student, epoch_num)
 
