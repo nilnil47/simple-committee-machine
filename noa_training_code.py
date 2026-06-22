@@ -416,6 +416,12 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Log metrics to W&B every N epochs",
     )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=MAX_EPOCHS,
+        help=f"Number of training epochs (default: {MAX_EPOCHS})",
+    )
     parser.add_argument("--offline", action="store_true", help="Use WANDB_MODE=offline")
     return parser.parse_args()
 
@@ -425,13 +431,16 @@ def main() -> None:
     if args.offline:
         os.environ["WANDB_MODE"] = "offline"
 
+    max_epochs = args.epochs
+    lr_list = [(max_epochs, LR0 / 2), (int(1.2 * max_epochs), 0)]
+
     save_path = resolve_save_path(args.save_path)
     seeds = np.random.randint(0, 3000, NUM_NETS)
 
     print(f"Device: {DEVICE}")
     print(
         "Original setup: "
-        f"epochs={MAX_EPOCHS}, n_train={N_TRAIN}, n_test={N_TEST}, "
+        f"epochs={max_epochs}, n_train={N_TRAIN}, n_test={N_TEST}, "
         f"widths={WIDTHS}, activation={ACTIVATION}, lr0={LR0}, num_nets={NUM_NETS}"
     )
     print(f"Train seeds: {seeds.tolist()}, test_seed={TEST_SEED}")
@@ -454,9 +463,9 @@ def main() -> None:
                 "activation": ACTIVATION,
                 "n_train": N_TRAIN,
                 "n_test": N_TEST,
-                "max_epochs": MAX_EPOCHS,
+                "max_epochs": max_epochs,
                 "lr0": LR0,
-                "lr_list": LR_LIST,
+                "lr_list": lr_list,
                 "initial_lr": LR0 / 2,
                 "sl2s": SL2S,
                 "sigma_2": S2,
@@ -480,14 +489,14 @@ def main() -> None:
             WIDTHS,
             N_TRAIN,
             N_TEST,
-            MAX_EPOCHS,
+            max_epochs,
             S2,
             SL2S,
             FL_SCALE,
             [int(train_seed), TEST_SEED],
             ACTIVATION,
             str(save_path),
-            LR_LIST,
+            lr_list,
             TARGET,
             DEVICE,
         )
