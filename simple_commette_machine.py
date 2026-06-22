@@ -1,4 +1,4 @@
-"""Committee student on linear teacher w*·x. Offline data, full-batch SGD."""
+"""Committee student on linear teacher w*·x. Offline data, full-batch Adam."""
 
 import math
 from pathlib import Path
@@ -10,15 +10,15 @@ import torch.optim as optim
 import wandb
 
 DIMENSION = 10
-N_HIDDEN = 32
-LR = 0.001
+N_HIDDEN = 1000
+LR = 1e-4
 EPOCHS = 10_000
 SEED = 42
 INIT_SEED = 42
 
-N_TRAIN_TOTAL = 1000
+N_TRAIN_TOTAL = 10_000
 N_TEST_TOTAL = 1000
-N_TRAIN_USED = 100
+N_TRAIN_USED = 10_000
 N_TEST_USED = 100
 
 CACHE = Path(".cache").parent / "simple-committee-machine"
@@ -86,7 +86,13 @@ def empirical_cross_gradient(
 def ensure_init_weights() -> None:
     """Sample init once from N(0, 1/sqrt(d)), per-row unit normalize, cache for all runs."""
     if INIT_WEIGHTS_PATH.exists():
-        return
+        state = torch.load(INIT_WEIGHTS_PATH, weights_only=True)
+        if state["W"].shape == (N_HIDDEN, DIMENSION):
+            return
+        print(
+            f"Regenerating init weights (cached shape {tuple(state['W'].shape)} "
+            f"!= ({N_HIDDEN}, {DIMENSION}))"
+        )
     torch.manual_seed(INIT_SEED)
     student = CommitteeStudent(DIMENSION, N_HIDDEN)
     torch.save(student.state_dict(), INIT_WEIGHTS_PATH)
@@ -199,7 +205,10 @@ def save_loss_loglog_plot(
 
 if __name__ == "__main__":
     CACHE.mkdir(parents=True, exist_ok=True)
-    if (CACHE / "x_train.pt").exists():
+    data_cache_ok = (CACHE / "x_train.pt").exists() and torch.load(
+        CACHE / "x_train.pt", weights_only=True
+    ).shape[0] >= N_TRAIN_TOTAL
+    if data_cache_ok:
         w_star = torch.load(CACHE / "w_star.pt", weights_only=True)
         x_train = torch.load(CACHE / "x_train.pt", weights_only=True)
         x_test = torch.load(CACHE / "x_test.pt", weights_only=True)
@@ -234,6 +243,7 @@ if __name__ == "__main__":
             "dimension": DIMENSION,
             "n_hidden": N_HIDDEN,
             "lr": LR,
+            "optimizer": "adam",
             "epochs": EPOCHS,
             "n_train_used": N_TRAIN_USED,
             "n_test_used": N_TEST_USED,
@@ -255,7 +265,7 @@ if __name__ == "__main__":
     wandb.define_metric("grad_norm", step_metric="epoch")
     wandb.define_metric("test_loss_minus_nngp", step_metric="epoch")
     save_epochs = set(SAVE_EPOCHS or ())
-    optimizer = optim.SGD(student.parameters(), lr=LR, momentum=0)
+    optimizer = optim.Adam(student.parameters(), lr=LR)
     loss_fn = nn.MSELoss()
     epochs_hist: list[int] = []
     train_loss_hist: list[float] = []
