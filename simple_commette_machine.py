@@ -25,6 +25,7 @@ CACHE = Path(".cache").parent / "simple-committee-machine"
 INIT_WEIGHTS_PATH = CACHE / "student_init.pt"
 TRAINED_WEIGHTS_PATH = CACHE / "student_trained.pt"
 LOSS_LOGLOG_PLOT_PATH = CACHE / "loss_loglog.png"
+WEIGHTS_HIST_PLOT_PATH = CACHE / "weights_overlap_hist.png"
 CHECKPOINT_DIR = CACHE / "checkpoints"
 
 # 1-indexed epochs at which to save student weights; None = final checkpoint only
@@ -203,6 +204,51 @@ def save_loss_loglog_plot(
     return path
 
 
+def save_weights_histogram(
+    path: Path,
+    series: list[tuple[str, torch.Tensor]],
+    *,
+    xlabel: str = "overlap m = w · w*",
+    ylabel: str = "count",
+    title: str | None = None,
+    bins: int = 30,
+    vlines: tuple[float, ...] | None = None,
+) -> Path:
+    """Overlaid count histograms for hidden-unit weight statistics."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    all_vals = torch.cat([values.detach().flatten() for _, values in series])
+    bin_lo = all_vals.min().item()
+    bin_hi = all_vals.max().item()
+    pad = 0.05 * (bin_hi - bin_lo + 1e-6)
+    hist_range = (bin_lo - pad, bin_hi + pad)
+
+    for label, values in series:
+        ax.hist(
+            values.detach().flatten().numpy(),
+            bins=bins,
+            range=hist_range,
+            alpha=0.55,
+            label=label,
+            edgecolor="black",
+            linewidth=0.4,
+        )
+    if vlines:
+        for v in vlines:
+            ax.axvline(v, color="C3", linestyle=":", linewidth=1.2, alpha=0.8)
+            ax.axvline(-v, color="C3", linestyle=":", linewidth=1.2, alpha=0.8)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
 if __name__ == "__main__":
     CACHE.mkdir(parents=True, exist_ok=True)
     data_cache_ok = (CACHE / "x_train.pt").exists() and torch.load(
@@ -312,6 +358,15 @@ if __name__ == "__main__":
     )
     print(f"Saved log-log loss plot to {plot_path}")
     wandb.log({"loss_loglog": wandb.Image(str(plot_path))})
+
+    init_overlaps = (torch.load(INIT_WEIGHTS_PATH, weights_only=True)["W"] @ w_star).squeeze(-1)
+    trained_overlaps = (student.W @ w_star).squeeze(-1)
+    weights_hist_path = save_weights_histogram(
+        WEIGHTS_HIST_PLOT_PATH,
+        [("init", init_overlaps), ("trained", trained_overlaps)],
+    )
+    print(f"Saved weights histogram to {weights_hist_path}")
+    wandb.log({"weights_overlap_hist": wandb.Image(str(weights_hist_path))})
 
     torch.save(student.state_dict(), TRAINED_WEIGHTS_PATH)
     print(f"Saved trained weights to {TRAINED_WEIGHTS_PATH}")

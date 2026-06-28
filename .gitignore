@@ -19,3 +19,8 @@ wandb/
 .DS_Store
 
 connect.sh
+connect_lab.sh
+*.pt
+*.png
+simple-committee-machine/**/*.png
+simple-committee-machine/**/*.pt
