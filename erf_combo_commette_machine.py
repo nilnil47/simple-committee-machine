@@ -9,8 +9,6 @@ import torch.nn as nn
 import torch.optim as optim
 import wandb
 
-from simple_commette_machine import CommitteeStudent, save_loss_loglog_plot, save_weights_histogram
-
 DIMENSION = 1
 N_HIDDEN = 2
 LR = 1e-4
@@ -47,6 +45,19 @@ SAVE_EPOCHS: list[int] | None = [500]
 LOAD_FROM = CACHE / "student_init.pt"
 # LOAD_FROM = TRAINED_WEIGHTS_PATH
 # LOAD_FROM = None
+
+
+class CommitteeStudent(nn.Module):
+    def __init__(self, d, n_hidden):
+        super().__init__()
+        self.scale = 1.0 / math.sqrt(n_hidden)
+        self.W = nn.Parameter(torch.empty(n_hidden, d))
+        nn.init.normal_(self.W, 0.0, 1.0 / math.sqrt(d))
+        with torch.no_grad():
+            self.W /= torch.norm(self.W, dim=1, keepdim=True)
+
+    def forward(self, x):
+        return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
 
 
 def teacher_erf_combo(x: torch.Tensor) -> torch.Tensor:
@@ -118,6 +129,85 @@ def make_theory_grid(
 ) -> torch.Tensor:
     xs = torch.linspace(x_min, x_max, n_points)
     return xs.unsqueeze(1)
+
+
+def save_loss_loglog_plot(
+    epochs: list[int],
+    train_losses: list[float],
+    test_losses: list[float],
+    path: Path,
+    nngp_test_mse: float | None = None,
+) -> Path:
+    eps = 1e-12
+    x = [e + 1 for e in epochs]
+    train_y = [max(v, eps) for v in train_losses]
+    test_y = [max(v, eps) for v in test_losses]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.loglog(x, train_y, label="train loss", linewidth=1.5)
+    ax.loglog(x, test_y, label="test loss", linewidth=1.5)
+    if nngp_test_mse is not None:
+        ax.axhline(
+            max(nngp_test_mse, eps),
+            color="C2",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"NNGP test MSE ({nngp_test_mse:.4f})",
+        )
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("MSE")
+    ax.legend()
+    ax.grid(True, which="both", alpha=0.3)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def save_weights_histogram(
+    path: Path,
+    series: list[tuple[str, torch.Tensor]],
+    *,
+    xlabel: str = "overlap m = w · w*",
+    ylabel: str = "count",
+    title: str | None = None,
+    bins: int = 30,
+    vlines: tuple[float, ...] | None = None,
+) -> Path:
+    """Overlaid count histograms for hidden-unit weight statistics."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    all_vals = torch.cat([values.detach().flatten() for _, values in series])
+    bin_lo = all_vals.min().item()
+    bin_hi = all_vals.max().item()
+    pad = 0.05 * (bin_hi - bin_lo + 1e-6)
+    hist_range = (bin_lo - pad, bin_hi + pad)
+
+    for label, values in series:
+        ax.hist(
+            values.detach().flatten().numpy(),
+            bins=bins,
+            range=hist_range,
+            alpha=0.55,
+            label=label,
+            edgecolor="black",
+            linewidth=0.4,
+        )
+    if vlines:
+        for v in vlines:
+            ax.axvline(v, color="C3", linestyle=":", linewidth=1.2, alpha=0.8)
+            ax.axvline(-v, color="C3", linestyle=":", linewidth=1.2, alpha=0.8)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
 
 
 def save_theory_curves_plot(
