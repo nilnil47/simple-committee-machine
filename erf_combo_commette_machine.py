@@ -10,14 +10,14 @@ import torch.optim as optim
 import wandb
 
 DIMENSION = 1
-N_HIDDEN = 2
+N_HIDDEN = 3
 LR = 1e-4
 EPOCHS = 10_000
 SEED = 42
 INIT_SEED = 42
 
 N_TRAIN_TOTAL = 10_000
-N_TEST_TOTAL = 1000
+N_TEST_TOTAL = 100
 N_TRAIN_USED = 10_000
 N_TEST_USED = 100
 
@@ -27,19 +27,13 @@ TRAINED_WEIGHTS_PATH = CACHE / "student_trained.pt"
 LOSS_LOGLOG_PLOT_PATH = CACHE / "loss_loglog.png"
 PRED_VS_THEORY_PLOT_PATH = CACHE / "pred_vs_theory.png"
 THEORY_CURVES_PLOT_PATH = CACHE / "theory_curves.png"
-WEIGHTS_DIST_PLOT_PATH = CACHE / "weights_distribution.png"
+INIT_THEORY_CURVES_PLOT_PATH = CACHE / "theory_curves_init.png"
 CHECKPOINT_DIR = CACHE / "checkpoints"
 
-# Exact readout uses erf(1*x) and erf(0.5*x)
-THEORY_WEIGHT_SCALES = (1.0, 0.5)
-
-# Steps for the equal-weight architecture optimum (same f class as CommitteeStudent)
-THEORY_FIT_STEPS = 5_000
-THEORY_FIT_LR = 1e-2
 THEORY_GRID_POINTS = 500
 
 # 1-indexed epochs at which to save student weights; None = final checkpoint only
-SAVE_EPOCHS: list[int] | None = [500]
+# SAVE_EPOCHS: list[int] | None = [500]
 
 # None = start from saved init; "trained" = load TRAINED_WEIGHTS_PATH; or any .pt path
 LOAD_FROM = CACHE / "student_init.pt"
@@ -47,14 +41,15 @@ LOAD_FROM = CACHE / "student_init.pt"
 # LOAD_FROM = None
 
 
+INIT_W = torch.tensor([[1.0], [-0.5], [-0.5]])
+
+
 class CommitteeStudent(nn.Module):
     def __init__(self, d, n_hidden):
         super().__init__()
-        self.scale = 1.0 / math.sqrt(n_hidden)
-        self.W = nn.Parameter(torch.empty(n_hidden, d))
-        nn.init.normal_(self.W, 0.0, 1.0 / math.sqrt(d))
-        with torch.no_grad():
-            self.W /= torch.norm(self.W, dim=1, keepdim=True)
+        # self.scale = 1.0 / math.sqrt(n_hidden)
+        self.scale = 1.0
+        self.W = nn.Parameter(INIT_W.clone())
 
     def forward(self, x):
         return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
@@ -68,55 +63,6 @@ def teacher_erf_combo(x: torch.Tensor) -> torch.Tensor:
     """
     x1 = x[:, 0]
     return torch.erf(x1) - 2.0 * torch.erf(0.5 * x1)
-
-
-def exact_readout_reference(x: torch.Tensor) -> torch.Tensor:
-    """Exact representation when readout weights are free (not our architecture).
-
-    f*(x) = 1 * erf(1 * x) + (-2) * erf(0.5 * x) = teacher_erf_combo(x).
-    MSE is identically zero; this is the unconstrained theoretical limit.
-    """
-    x1 = x[:, 0]
-    return torch.erf(x1) - 2.0 * torch.erf(0.5 * x1)
-
-
-def equal_weight_committee(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    """Same hypothesis class as CommitteeStudent: (1/sqrt(P)) sum_p erf(w_p x)."""
-    p = w.shape[0]
-    scale = 1.0 / math.sqrt(p)
-    return scale * torch.erf(x @ w.T).sum(dim=-1)
-
-
-def fit_theoretical_equal_weight_committee(
-    n_hidden: int,
-    n_samples: int = 10_000,
-    steps: int = THEORY_FIT_STEPS,
-    lr: float = THEORY_FIT_LR,
-    seed: int = 0,
-) -> tuple[float, torch.Tensor]:
-    """Population MSE minimum for the equal-readout erf committee at fixed width.
-
-    Optimizes hidden pre-activations w_p (no unit-norm constraint) to minimize
-    E[(f(x) - y(x))^2] with x ~ N(0, 1). This is the best static fit achievable
-    by the architecture class before considering gradient-descent dynamics.
-    """
-    generator = torch.Generator().manual_seed(seed)
-    x = torch.randn(n_samples, DIMENSION, generator=generator)
-    y = teacher_erf_combo(x)
-
-    w = nn.Parameter(torch.randn(n_hidden, DIMENSION, generator=generator))
-    optimizer = optim.Adam([w], lr=lr)
-    for _ in range(steps):
-        pred = equal_weight_committee(x, w)
-        loss = ((pred - y) ** 2).mean()
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-    with torch.no_grad():
-        pred = equal_weight_committee(x, w)
-        mse = ((pred - y) ** 2).mean().item()
-    return mse, w.detach()
 
 
 def mse_vs_teacher(pred: torch.Tensor, x: torch.Tensor) -> float:
@@ -165,72 +111,18 @@ def save_loss_loglog_plot(
     return path
 
 
-def save_weights_histogram(
-    path: Path,
-    series: list[tuple[str, torch.Tensor]],
-    *,
-    xlabel: str = "overlap m = w · w*",
-    ylabel: str = "count",
-    title: str | None = None,
-    bins: int = 30,
-    vlines: tuple[float, ...] | None = None,
-) -> Path:
-    """Overlaid count histograms for hidden-unit weight statistics."""
-    fig, ax = plt.subplots(figsize=(8, 5))
-    all_vals = torch.cat([values.detach().flatten() for _, values in series])
-    bin_lo = all_vals.min().item()
-    bin_hi = all_vals.max().item()
-    pad = 0.05 * (bin_hi - bin_lo + 1e-6)
-    hist_range = (bin_lo - pad, bin_hi + pad)
-
-    for label, values in series:
-        ax.hist(
-            values.detach().flatten().numpy(),
-            bins=bins,
-            range=hist_range,
-            alpha=0.55,
-            label=label,
-            edgecolor="black",
-            linewidth=0.4,
-        )
-    if vlines:
-        for v in vlines:
-            ax.axvline(v, color="C3", linestyle=":", linewidth=1.2, alpha=0.8)
-            ax.axvline(-v, color="C3", linestyle=":", linewidth=1.2, alpha=0.8)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    if title:
-        ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    return path
-
-
 def save_theory_curves_plot(
     x: torch.Tensor,
     y_teacher: torch.Tensor,
     y_student: torch.Tensor,
-    y_arch_opt: torch.Tensor | None,
     path: Path,
+    student_label: str = "trained student",
 ) -> Path:
     xs = x[:, 0].numpy()
     fig, axes = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
 
     axes[0].plot(xs, y_teacher.numpy(), label="teacher y(x)", linewidth=2.0)
-    axes[0].plot(xs, y_student.numpy(), label="trained student", linewidth=1.5, alpha=0.85)
-    if y_arch_opt is not None:
-        axes[0].plot(
-            xs,
-            y_arch_opt.numpy(),
-            label="equal-weight arch optimum",
-            linewidth=1.5,
-            linestyle="--",
-            alpha=0.85,
-        )
+    axes[0].plot(xs, y_student.numpy(), label=student_label, linewidth=1.5, alpha=0.85)
     axes[0].set_ylabel("f(x)")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
@@ -255,26 +147,6 @@ def student_hidden_weights(student: CommitteeStudent) -> torch.Tensor:
     return student.W.detach().squeeze(-1)
 
 
-def save_weights_distribution_plot(
-    w_init: torch.Tensor,
-    w_trained: torch.Tensor,
-    w_arch_opt: torch.Tensor,
-    path: Path,
-) -> Path:
-    """Histogram of hidden pre-activation weights (same style as simple_commette_machine)."""
-    return save_weights_histogram(
-        path,
-        [
-            ("init", w_init.squeeze(-1)),
-            ("trained", w_trained.squeeze(-1)),
-            ("arch optimum", w_arch_opt.squeeze(-1)),
-        ],
-        xlabel="hidden weight w_p",
-        title="Hidden weight distribution",
-        vlines=THEORY_WEIGHT_SCALES,
-    )
-
-
 def save_pred_vs_theory_plot(
     y_teacher: torch.Tensor, y_student: torch.Tensor, path: Path
 ) -> Path:
@@ -297,9 +169,8 @@ def save_pred_vs_theory_plot(
 def analyze_convergence_to_theory(
     student: CommitteeStudent,
     x_test: torch.Tensor,
-    n_hidden: int,
 ) -> dict[str, float]:
-    """Compare trained student to teacher and equal-weight architecture optimum."""
+    """Compare trained student to the erf-combo teacher."""
     student.eval()
     with torch.no_grad():
         y_test = teacher_erf_combo(x_test)
@@ -311,36 +182,20 @@ def analyze_convergence_to_theory(
         y_student_grid = student(x_grid)
         trained_grid_mse = mse_vs_teacher(y_student_grid, x_grid)
 
-    arch_opt_mse, w_opt = fit_theoretical_equal_weight_committee(n_hidden)
-    with torch.no_grad():
-        y_arch_opt_grid = equal_weight_committee(x_grid, w_opt)
-        arch_opt_grid_mse = mse_vs_teacher(y_arch_opt_grid, x_grid)
-
     curves_path = save_theory_curves_plot(
         x_grid,
         y_teacher_grid,
         y_student_grid,
-        y_arch_opt_grid,
         THEORY_CURVES_PLOT_PATH,
     )
     scatter_path = save_pred_vs_theory_plot(y_test, y_student, PRED_VS_THEORY_PLOT_PATH)
 
     w_trained = student_hidden_weights(student)
-    w_init = torch.load(INIT_WEIGHTS_PATH, weights_only=True)["W"]
-    weights_path = save_weights_distribution_plot(
-        w_init, w_trained, w_opt.squeeze(-1), WEIGHTS_DIST_PLOT_PATH
-    )
-
-    print("Theoretical comparison:")
-    print(f"  exact_readout_mse=0.0000  (f = erf(x) - 2 erf(x/2) with free coefficients)")
-    print(f"  arch_opt_population_mse={arch_opt_mse:.6f}  (best equal-weight fit, P={n_hidden})")
-    print(f"  arch_opt_grid_mse={arch_opt_grid_mse:.6f}")
+    print("Teacher comparison:")
     print(f"  trained_test_mse={trained_test_mse:.6f}")
     print(f"  trained_grid_mse={trained_grid_mse:.6f}")
-    print(f"  trained_minus_arch_opt(test)={trained_test_mse - arch_opt_mse:.6f}")
     print(f"  saved theory curves to {curves_path}")
     print(f"  saved pred-vs-theory scatter to {scatter_path}")
-    print(f"  saved weights distribution to {weights_path}")
     print(
         f"  trained w_p: mean={w_trained.mean().item():.4f} "
         f"std={w_trained.std().item():.4f} "
@@ -348,12 +203,8 @@ def analyze_convergence_to_theory(
     )
 
     return {
-        "exact_readout_mse": 0.0,
-        "arch_opt_population_mse": arch_opt_mse,
-        "arch_opt_grid_mse": arch_opt_grid_mse,
         "trained_test_mse": trained_test_mse,
         "trained_grid_mse": trained_grid_mse,
-        "trained_minus_arch_opt": trained_test_mse - arch_opt_mse,
         "trained_w_mean": w_trained.mean().item(),
         "trained_w_std": w_trained.std().item(),
     }
@@ -368,16 +219,14 @@ def data_cache_valid() -> bool:
 
 
 def ensure_init_weights() -> None:
-    """Sample init once from N(0, 1/sqrt(d)), per-row unit normalize, cache for all runs."""
+    """Cache fixed init W = [1, -1/2, -1/2] for all runs."""
     if INIT_WEIGHTS_PATH.exists():
         state = torch.load(INIT_WEIGHTS_PATH, weights_only=True)
-        if state["W"].shape == (N_HIDDEN, DIMENSION):
+        if state["W"].shape == (N_HIDDEN, DIMENSION) and torch.allclose(
+            state["W"], INIT_W
+        ):
             return
-        print(
-            f"Regenerating init weights (cached shape {tuple(state['W'].shape)} "
-            f"!= ({N_HIDDEN}, {DIMENSION}))"
-        )
-    torch.manual_seed(INIT_SEED)
+        print("Regenerating init weights (cached W != [1, -1/2, -1/2])")
     student = CommitteeStudent(DIMENSION, N_HIDDEN)
     torch.save(student.state_dict(), INIT_WEIGHTS_PATH)
     print(f"Saved init weights to {INIT_WEIGHTS_PATH}")
@@ -438,6 +287,22 @@ if __name__ == "__main__":
 
     student, loaded_from = load_student(LOAD_FROM)
 
+    student.eval()
+    with torch.no_grad():
+        x_grid = make_theory_grid()
+        y_teacher_grid = teacher_erf_combo(x_grid)
+        y_student_init = student(x_grid)
+        init_grid_mse = mse_vs_teacher(y_student_init, x_grid)
+    init_curves_path = save_theory_curves_plot(
+        x_grid,
+        y_teacher_grid,
+        y_student_init,
+        INIT_THEORY_CURVES_PLOT_PATH,
+        student_label="initial student",
+    )
+    print(f"Saved initial theory curves to {init_curves_path}")
+    print(f"  init_grid_mse={init_grid_mse:.6f}")
+
     wandb.init(
         project="committee-student",
         name="erf_combo_d1",
@@ -459,6 +324,7 @@ if __name__ == "__main__":
     wandb.define_metric("test_loss", step_metric="epoch")
     wandb.define_metric("loss", step_metric="epoch")
     wandb.define_metric("grad_norm", step_metric="epoch")
+    wandb.log({"theory_curves_init": wandb.Image(str(init_curves_path))}, step=0)
     save_epochs = set(SAVE_EPOCHS or ())
     optimizer = optim.Adam(student.parameters(), lr=LR)
     loss_fn = nn.MSELoss()
@@ -509,13 +375,12 @@ if __name__ == "__main__":
     torch.save(student.state_dict(), TRAINED_WEIGHTS_PATH)
     print(f"Saved trained weights to {TRAINED_WEIGHTS_PATH}")
 
-    theory_metrics = analyze_convergence_to_theory(student, x_test, N_HIDDEN)
-    wandb.run.summary.update(theory_metrics)
+    theory_metrics = analyze_convergence_to_theory(student, x_test)
+    wandb.run.summary.update({"init_grid_mse": init_grid_mse, **theory_metrics})
     wandb.log(
         {
             "pred_vs_theory": wandb.Image(str(PRED_VS_THEORY_PLOT_PATH)),
             "theory_curves": wandb.Image(str(THEORY_CURVES_PLOT_PATH)),
-            "weights_distribution": wandb.Image(str(WEIGHTS_DIST_PLOT_PATH)),
         }
     )
     wandb.finish()
