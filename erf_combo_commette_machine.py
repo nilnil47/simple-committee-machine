@@ -9,10 +9,12 @@ import torch.nn as nn
 import torch.optim as optim
 import wandb
 
-DIMENSION = 20
-N = 100
+DIMENSION = 1
+N = 16
+
 W_STAR = torch.zeros(DIMENSION)
 W_STAR[0] = 1.0
+
 LR = 1e-4
 EPOCHS = 10_000
 SEED = 42
@@ -183,28 +185,21 @@ def save_weight_distribution_plot(
         lo -= 0.5
         hi += 0.5
     bins = WEIGHT_DIST_BINS
+    hist_range = (lo, hi)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.hist(
-        init_proj,
-        bins=bins,
-        range=(lo, hi),
-        alpha=0.6,
-        label="initial",
-        color="C0",
-    )
-    ax.hist(
-        trained_proj,
-        bins=bins,
-        range=(lo, hi),
-        alpha=0.6,
-        label="trained",
-        color="C1",
-    )
-    ax.set_xlabel(r"$w \cdot w^*$")
-    ax.set_ylabel("count")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    fig, axes = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
+
+    axes[0].hist(init_proj, bins=bins, range=hist_range, color="C0", alpha=0.85)
+    axes[0].set_ylabel("count")
+    axes[0].set_title("initial")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].hist(trained_proj, bins=bins, range=hist_range, color="C1", alpha=0.85)
+    axes[1].set_xlabel(r"$w \cdot w^*$")
+    axes[1].set_ylabel("count")
+    axes[1].set_title("trained")
+    axes[1].grid(True, alpha=0.3)
+
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
