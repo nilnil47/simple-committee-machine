@@ -9,27 +9,37 @@ import torch.nn as nn
 import torch.optim as optim
 import wandb
 
-DIMENSION = 1
+DIMENSION = 10
 N = 16
+# N = 100
 
 W_STAR = torch.zeros(DIMENSION)
 W_STAR[0] = 1.0
 
 LR = 1e-4
 EPOCHS = 10_000
+
+# Optimizer: "adam" or "gd" (plain gradient descent, no momentum)
+OPTIMIZER = "adam"
+# OPTIMIZER = "gd"
 SEED = 42
 INIT_SEED = 42
 INIT_MEAN = 0.0
+# INIT_VAR = 0.1 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
 INIT_VAR = 1.0 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
 
 # Init mode: "gaussian" or "manual"
-INIT_MODE = "gaussian"
-# INIT_MODE = "manual"
+# INIT_MODE = "gaussian"
+INIT_MODE = "manual"
 
 # Manual init: one entry per hidden unit (length N).
 # d=1: each entry is a scalar w_p, e.g. [1.0, -0.5, -0.5, 0.0, ...]
 # d>1: each entry is a length-d list for that unit's weight row
-INIT_W_MANUAL: list[float] | list[list[float]] | None = [1.0] * 4 + [-0.5] * 2 * 4 + [0.0] * 4
+INIT_W_MANUAL: list[float] | list[list[float]] | None = (
+    [[1.0] + [0.0] * (DIMENSION - 1)] * 4
+    + [[-0.5] + [0.0] * (DIMENSION - 1)] * 8
+    + [[0.0] * DIMENSION] * 4
+)
 # INIT_MODE = "manual"
 # INIT_W_MANUAL = [1.0, -0.5, -0.5] + [0.0] * (N - 3)
 
@@ -367,6 +377,16 @@ def ensure_init_weights() -> None:
     print(f"Saved init weights to {INIT_WEIGHTS_PATH}")
 
 
+def make_optimizer(
+    params, lr: float, optimizer: str = OPTIMIZER
+) -> optim.Optimizer:
+    if optimizer == "adam":
+        return optim.Adam(params, lr=lr)
+    if optimizer == "gd":
+        return optim.SGD(params, lr=lr)
+    raise ValueError(f"Unknown OPTIMIZER: {optimizer!r} (use 'adam' or 'gd')")
+
+
 def resolve_checkpoint(load_from: str | Path | None) -> Path:
     if load_from is None:
         return INIT_WEIGHTS_PATH
@@ -446,7 +466,7 @@ if __name__ == "__main__":
             "P": P,
             "student": "(1/sqrt(N)) sum_p erf(w_p·x)",
             "lr": LR,
-            "optimizer": "adam",
+            "optimizer": OPTIMIZER,
             "epochs": EPOCHS,
             "n_test_used": N_TEST_USED,
             "init_seed": INIT_SEED,
@@ -463,7 +483,7 @@ if __name__ == "__main__":
     wandb.define_metric("loss", step_metric="epoch")
     wandb.define_metric("grad_norm", step_metric="epoch")
     save_epochs = set(SAVE_EPOCHS or ())
-    optimizer = optim.Adam(student.parameters(), lr=LR)
+    optimizer = make_optimizer(student.parameters(), LR)
     loss_fn = nn.MSELoss()
     epochs_hist: list[int] = []
     train_loss_hist: list[float] = []
