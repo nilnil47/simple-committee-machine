@@ -1,6 +1,5 @@
-"""Erf committee on teacher y = erf(x_1) - 2 erf(x_1/2). d=1, full-batch Adam."""
+"""Student f(x) = erf(w·x) - 2 erf(w·x/2) on teacher y = erf(x_1) - 2 erf(x_1/2). d=20."""
 
-import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -9,17 +8,18 @@ import torch.nn as nn
 import torch.optim as optim
 import wandb
 
-DIMENSION = 1
-N_HIDDEN = 3
+DIMENSION = 20
+W_STAR = torch.zeros(DIMENSION)
+W_STAR[0] = 1.0
 LR = 1e-4
-EPOCHS = 20_000
+EPOCHS = 10_000
 SEED = 42
 INIT_SEED = 42
 
 N_TRAIN_TOTAL = 10_000
-N_TEST_TOTAL = 10_000
-N_TRAIN_USED = 1000
-N_TEST_USED = 1000
+N_TEST_TOTAL = 5_000
+N_TRAIN_USED = 100
+N_TEST_USED = 100
 
 CACHE = Path(".cache").parent / "simple-committee-machine-erf-combo"
 INIT_WEIGHTS_PATH = CACHE / "student_init.pt"
@@ -42,19 +42,17 @@ LOAD_FROM = CACHE / "student_init.pt"
 # LOAD_FROM = None
 
 
-# INIT_W = torch.tensor([[1.0], [-0.5], [-0.5]])
-INIT_W = torch.tensor([[0.0], [0.0], [0.0]])
+INIT_W = torch.zeros(DIMENSION)
 
 
 class CommitteeStudent(nn.Module):
-    def __init__(self, d, n_hidden):
+    def __init__(self, d):
         super().__init__()
-        self.scale = 1.0 / math.sqrt(n_hidden)
-        # self.scale = 1.0
         self.W = nn.Parameter(INIT_W.clone())
 
     def forward(self, x):
-        return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
+        z = x @ self.W
+        return torch.erf(z) - 2.0 * torch.erf(0.5 * z)
 
 
 def teacher_erf_combo(x: torch.Tensor) -> torch.Tensor:
@@ -76,7 +74,9 @@ def make_theory_grid(
     x_min: float = -3.0, x_max: float = 3.0, n_points: int = THEORY_GRID_POINTS
 ) -> torch.Tensor:
     xs = torch.linspace(x_min, x_max, n_points)
-    return xs.unsqueeze(1)
+    grid = torch.zeros(n_points, DIMENSION)
+    grid[:, 0] = xs
+    return grid
 
 
 def save_loss_loglog_plot(
@@ -152,8 +152,13 @@ def save_theory_stages_plot(
 
 
 def student_hidden_weights(student: CommitteeStudent) -> torch.Tensor:
-    """Scalar pre-activation weights w_p for each hidden unit (d=1)."""
-    return student.W.detach().squeeze(-1)
+    """Learned weight vector w, shape (d,)."""
+    return student.W.detach()
+
+
+def project_onto_w_star(w: torch.Tensor) -> torch.Tensor:
+    """Scalar alignment w·w* with the teacher direction."""
+    return w @ W_STAR
 
 
 def format_weight_vector_text(w: torch.Tensor, max_values: int = 12) -> str:
@@ -174,32 +179,63 @@ def save_weight_distribution_plot(
     w_init_np = w_init.numpy()
     w_trained_np = w_trained.numpy()
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    lo = min(w_init_np.min(), w_trained_np.min())
+    hi = max(w_init_np.max(), w_trained_np.max())
+    if lo == hi:
+        lo -= 0.5
+        hi += 0.5
+    bins = 20
+
+    fig, axes = plt.subplots(2, 1, figsize=(8, 8))
+
+    axes[0].hist(
+        w_init_np,
+        bins=bins,
+        range=(lo, hi),
+        alpha=0.6,
+        label="initial",
+        color="C0",
+    )
+    axes[0].hist(
+        w_trained_np,
+        bins=bins,
+        range=(lo, hi),
+        alpha=0.6,
+        label="trained",
+        color="C1",
+    )
+    axes[0].set_xlabel(r"$w_i$")
+    axes[0].set_ylabel("count")
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
     x = list(range(len(w_init_np)))
     width = 0.35
-    ax.bar(
+    axes[1].bar(
         [i - width / 2 for i in x],
         w_init_np,
         width,
         label="initial",
         color="C0",
     )
-    ax.bar(
+    axes[1].bar(
         [i + width / 2 for i in x],
         w_trained_np,
         width,
         label="trained",
         color="C1",
     )
-    ax.set_xticks(x)
-    ax.set_xticklabels([f"w_{i + 1}" for i in x])
-    ax.set_ylabel("w_p")
-    ax.legend()
-    ax.grid(True, alpha=0.3, axis="y")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels([f"w_{i + 1}" for i in x])
+    axes[1].set_ylabel(r"$w_i$")
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3, axis="y")
 
     vector_text = (
-        f"init:    {format_weight_vector_text(w_init)}\n"
-        f"trained: {format_weight_vector_text(w_trained)}"
+        f"init w:    {format_weight_vector_text(w_init)}\n"
+        f"trained w: {format_weight_vector_text(w_trained)}\n"
+        f"init w·w*: {project_onto_w_star(w_init).item():.6f}  "
+        f"trained w·w*: {project_onto_w_star(w_trained).item():.6f}"
     )
     fig.text(
         0.5,
@@ -263,44 +299,42 @@ def analyze_convergence_to_theory(
     )
     scatter_path = save_pred_vs_theory_plot(y_test, y_student, PRED_VS_THEORY_PLOT_PATH)
 
-    w_trained = student_hidden_weights(student)
+    w_dot_wstar = project_onto_w_star(student_hidden_weights(student)).item()
     print("Teacher comparison:")
     print(f"  trained_test_mse={trained_test_mse:.6f}")
     print(f"  trained_grid_mse={trained_grid_mse:.6f}")
     print(f"  saved theory curves to {curves_path}")
     print(f"  saved pred-vs-theory scatter to {scatter_path}")
-    print(
-        f"  trained w_p: mean={w_trained.mean().item():.4f} "
-        f"std={w_trained.std().item():.4f} "
-        f"min={w_trained.min().item():.4f} max={w_trained.max().item():.4f}"
-    )
+    print(f"  trained w·w*: {w_dot_wstar:.4f}")
 
     return {
         "trained_test_mse": trained_test_mse,
         "trained_grid_mse": trained_grid_mse,
-        "trained_w_mean": w_trained.mean().item(),
-        "trained_w_std": w_trained.std().item(),
+        "trained_w_dot_wstar": w_dot_wstar,
     }
 
 
-def data_cache_valid() -> bool:
-    x_path = CACHE / "x_train.pt"
-    if not x_path.exists():
+def _cached_data_valid(path: Path, min_rows: int) -> bool:
+    if not path.exists():
         return False
-    x = torch.load(x_path, weights_only=True)
-    return x.shape[0] >= N_TRAIN_TOTAL and x.shape[1] == DIMENSION
+    x = torch.load(path, weights_only=True)
+    return x.shape[0] >= min_rows and x.shape[1] == DIMENSION
+
+
+def data_cache_valid() -> bool:
+    return _cached_data_valid(CACHE / "x_train.pt", N_TRAIN_TOTAL) and _cached_data_valid(
+        CACHE / "x_test.pt", N_TEST_TOTAL
+    )
 
 
 def ensure_init_weights() -> None:
-    """Cache fixed init W = [1, -1/2, -1/2] for all runs."""
+    """Cache fixed init w = 0 for all runs."""
     if INIT_WEIGHTS_PATH.exists():
         state = torch.load(INIT_WEIGHTS_PATH, weights_only=True)
-        if state["W"].shape == (N_HIDDEN, DIMENSION) and torch.allclose(
-            state["W"], INIT_W
-        ):
+        if state["W"].shape == (DIMENSION,) and torch.allclose(state["W"], INIT_W):
             return
-        print("Regenerating init weights (cached W != [1, -1/2, -1/2])")
-    student = CommitteeStudent(DIMENSION, N_HIDDEN)
+        print("Regenerating init weights (cached w shape or values mismatch)")
+    student = CommitteeStudent(DIMENSION)
     torch.save(student.state_dict(), INIT_WEIGHTS_PATH)
     print(f"Saved init weights to {INIT_WEIGHTS_PATH}")
 
@@ -315,7 +349,7 @@ def resolve_checkpoint(load_from: str | Path | None) -> Path:
 
 def load_student(load_from: str | Path | None) -> tuple[CommitteeStudent, Path]:
     ensure_init_weights()
-    student = CommitteeStudent(DIMENSION, N_HIDDEN)
+    student = CommitteeStudent(DIMENSION)
     path = resolve_checkpoint(load_from)
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
@@ -372,11 +406,11 @@ if __name__ == "__main__":
 
     wandb.init(
         project="committee-student",
-        name="erf_combo_d1",
+        name="erf_combo_d20",
         config={
             "task": "erf_combo",
             "dimension": DIMENSION,
-            "n_hidden": N_HIDDEN,
+            "student": "erf(w·x) - 2 erf(w·x/2)",
             "lr": LR,
             "optimizer": "adam",
             "epochs": EPOCHS,
@@ -447,8 +481,8 @@ if __name__ == "__main__":
         w_init, w_trained, WEIGHT_DISTRIBUTION_PLOT_PATH
     )
     print(f"Saved weight distribution plot to {weight_plot_path}")
-    print(f"  init w_p:    {w_init.tolist()}")
-    print(f"  trained w_p: {w_trained.tolist()}")
+    print(f"  init w·w*: {project_onto_w_star(w_init).item():.6f}")
+    print(f"  trained w·w*: {project_onto_w_star(w_trained).item():.6f}")
 
     wandb.run.summary.update({"init_grid_mse": init_grid_mse, **theory_metrics})
     wandb.log(
