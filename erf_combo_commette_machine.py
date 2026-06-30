@@ -22,6 +22,17 @@ INIT_SEED = 42
 INIT_MEAN = 0.0
 INIT_VAR = 1.0 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
 
+# Init mode: "gaussian" or "manual"
+INIT_MODE = "gaussian"
+# INIT_MODE = "manual"
+
+# Manual init: one entry per hidden unit (length N).
+# d=1: each entry is a scalar w_p, e.g. [1.0, -0.5, -0.5, 0.0, ...]
+# d>1: each entry is a length-d list for that unit's weight row
+INIT_W_MANUAL: list[float] | list[list[float]] | None = [1.0] * 4 + [-0.5] * 2 * 4 + [0.0] * 4
+# INIT_MODE = "manual"
+# INIT_W_MANUAL = [1.0, -0.5, -0.5] + [0.0] * (N - 3)
+
 N_TRAIN_TOTAL = 10_000
 N_TEST_TOTAL = 5_000
 P = 100
@@ -55,11 +66,42 @@ def sample_init_W(n: int, d: int) -> torch.Tensor:
     return INIT_MEAN + math.sqrt(INIT_VAR) * torch.randn(n, d, generator=g)
 
 
+def manual_init_W(n: int, d: int) -> torch.Tensor:
+    if INIT_W_MANUAL is None:
+        raise ValueError("INIT_MODE='manual' requires INIT_W_MANUAL")
+    if len(INIT_W_MANUAL) != n:
+        raise ValueError(
+            f"INIT_W_MANUAL must have length N={n}, got {len(INIT_W_MANUAL)}"
+        )
+    if d == 1:
+        return torch.tensor(INIT_W_MANUAL, dtype=torch.float32).reshape(n, d)
+    rows: list[list[float]] = []
+    for i, row in enumerate(INIT_W_MANUAL):
+        if isinstance(row, (int, float)):
+            raise ValueError(
+                f"INIT_W_MANUAL[{i}] must be a length-{d} list when DIMENSION > 1"
+            )
+        if len(row) != d:
+            raise ValueError(
+                f"INIT_W_MANUAL[{i}] must have length d={d}, got {len(row)}"
+            )
+        rows.append([float(v) for v in row])
+    return torch.tensor(rows, dtype=torch.float32)
+
+
+def make_init_W(n: int, d: int) -> torch.Tensor:
+    if INIT_MODE == "gaussian":
+        return sample_init_W(n, d)
+    if INIT_MODE == "manual":
+        return manual_init_W(n, d)
+    raise ValueError(f"Unknown INIT_MODE: {INIT_MODE!r}")
+
+
 class CommitteeStudent(nn.Module):
     def __init__(self, d, n):
         super().__init__()
         self.scale = 1.0 / math.sqrt(n)
-        self.W = nn.Parameter(sample_init_W(n, d))
+        self.W = nn.Parameter(make_init_W(n, d))
 
     def forward(self, x):
         return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
@@ -285,28 +327,43 @@ def data_cache_valid() -> bool:
     )
 
 
-def ensure_init_weights() -> None:
-    """Sample init once from N(INIT_MEAN, INIT_VAR), cache for all runs."""
-    if INIT_WEIGHTS_PATH.exists():
-        state = torch.load(INIT_WEIGHTS_PATH, weights_only=True)
-        if (
-            state["W"].shape == (N, DIMENSION)
-            and state.get("init_seed") == INIT_SEED
+def _init_cache_matches(state: dict) -> bool:
+    if state["W"].shape != (N, DIMENSION):
+        return False
+    if state.get("init_mode") != INIT_MODE:
+        return False
+    if INIT_MODE == "gaussian":
+        return (
+            state.get("init_seed") == INIT_SEED
             and state.get("init_mean") == INIT_MEAN
             and state.get("init_var") == INIT_VAR
-        ):
+        )
+    if INIT_MODE == "manual":
+        return torch.allclose(state["W"], make_init_W(N, DIMENSION))
+    return False
+
+
+def ensure_init_weights() -> None:
+    """Cache init weights for all runs (Gaussian or manual)."""
+    if INIT_WEIGHTS_PATH.exists():
+        state = torch.load(INIT_WEIGHTS_PATH, weights_only=True)
+        if _init_cache_matches(state):
             return
         print("Regenerating init weights (cached init mismatch)")
     student = CommitteeStudent(DIMENSION, N)
-    torch.save(
-        {
-            "W": student.W.detach().clone(),
-            "init_seed": INIT_SEED,
-            "init_mean": INIT_MEAN,
-            "init_var": INIT_VAR,
-        },
-        INIT_WEIGHTS_PATH,
-    )
+    payload: dict = {
+        "W": student.W.detach().clone(),
+        "init_mode": INIT_MODE,
+    }
+    if INIT_MODE == "gaussian":
+        payload.update(
+            {
+                "init_seed": INIT_SEED,
+                "init_mean": INIT_MEAN,
+                "init_var": INIT_VAR,
+            }
+        )
+    torch.save(payload, INIT_WEIGHTS_PATH)
     print(f"Saved init weights to {INIT_WEIGHTS_PATH}")
 
 
@@ -325,7 +382,7 @@ def load_student(load_from: str | Path | None) -> tuple[CommitteeStudent, Path]:
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
     state = torch.load(path, weights_only=True)
-    if "init_seed" in state:
+    if "init_mode" in state or "init_seed" in state:
         student.load_state_dict({"W": state["W"]})
     else:
         student.load_state_dict(state)
@@ -395,6 +452,8 @@ if __name__ == "__main__":
             "init_seed": INIT_SEED,
             "init_mean": INIT_MEAN,
             "init_var": INIT_VAR,
+            "init_mode": INIT_MODE,
+            "init_w_manual": INIT_W_MANUAL,
             "loaded_from": str(loaded_from),
             "save_epochs": SAVE_EPOCHS,
         },
