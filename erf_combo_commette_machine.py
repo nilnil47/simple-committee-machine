@@ -12,14 +12,14 @@ import wandb
 DIMENSION = 1
 N_HIDDEN = 3
 LR = 1e-4
-EPOCHS = 10_000
+EPOCHS = 20_000
 SEED = 42
 INIT_SEED = 42
 
 N_TRAIN_TOTAL = 10_000
 N_TEST_TOTAL = 10_000
-N_TRAIN_USED = 100
-N_TEST_USED = 100
+N_TRAIN_USED = 1000
+N_TEST_USED = 1000
 
 CACHE = Path(".cache").parent / "simple-committee-machine-erf-combo"
 INIT_WEIGHTS_PATH = CACHE / "student_init.pt"
@@ -27,7 +27,6 @@ TRAINED_WEIGHTS_PATH = CACHE / "student_trained.pt"
 LOSS_LOGLOG_PLOT_PATH = CACHE / "loss_loglog.png"
 PRED_VS_THEORY_PLOT_PATH = CACHE / "pred_vs_theory.png"
 THEORY_CURVES_PLOT_PATH = CACHE / "theory_curves.png"
-INIT_THEORY_CURVES_PLOT_PATH = CACHE / "theory_curves_init.png"
 WEIGHT_DISTRIBUTION_PLOT_PATH = CACHE / "weights_distribution.png"
 CHECKPOINT_DIR = CACHE / "checkpoints"
 
@@ -43,8 +42,8 @@ LOAD_FROM = CACHE / "student_init.pt"
 # LOAD_FROM = None
 
 
-INIT_W = torch.tensor([[1.0], [-0.5], [-0.5]])
-# INIT_W = torch.tensor([[0.0], [0.0], [0.0]])
+# INIT_W = torch.tensor([[1.0], [-0.5], [-0.5]])
+INIT_W = torch.tensor([[0.0], [0.0], [0.0]])
 
 
 class CommitteeStudent(nn.Module):
@@ -114,28 +113,6 @@ def save_loss_loglog_plot(
     return path
 
 
-def save_teacher_student_curve_plot(
-    x: torch.Tensor,
-    y_teacher: torch.Tensor,
-    y_student: torch.Tensor,
-    path: Path,
-    student_label: str = "student",
-) -> Path:
-    xs = x[:, 0].numpy()
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(xs, y_teacher.numpy(), label="teacher y(x)", linewidth=2.0)
-    ax.plot(xs, y_student.numpy(), label=student_label, linewidth=1.5, alpha=0.85)
-    ax.set_xlabel("x")
-    ax.set_ylabel("f(x)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    return path
-
-
 def save_theory_stages_plot(
     x: torch.Tensor,
     y_teacher: torch.Tensor,
@@ -172,18 +149,6 @@ def save_theory_stages_plot(
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
-
-
-def save_theory_curves_plot(
-    x: torch.Tensor,
-    y_teacher: torch.Tensor,
-    y_student: torch.Tensor,
-    path: Path,
-    student_label: str = "trained student",
-) -> Path:
-    return save_teacher_student_curve_plot(
-        x, y_teacher, y_student, path, student_label=student_label
-    )
 
 
 def student_hidden_weights(student: CommitteeStudent) -> torch.Tensor:
@@ -401,15 +366,7 @@ if __name__ == "__main__":
         y_teacher_grid = teacher_erf_combo(x_grid)
         y_student_init = student(x_grid)
         init_grid_mse = mse_vs_teacher(y_student_init, x_grid)
-    init_curves_path = save_theory_curves_plot(
-        x_grid,
-        y_teacher_grid,
-        y_student_init,
-        INIT_THEORY_CURVES_PLOT_PATH,
-        student_label="initial student",
-    )
-    print(f"Saved initial theory curves to {init_curves_path}")
-    print(f"  init_grid_mse={init_grid_mse:.6f}")
+    print(f"init_grid_mse={init_grid_mse:.6f}")
 
     w_init = student_hidden_weights(student).clone()
 
@@ -434,7 +391,6 @@ if __name__ == "__main__":
     wandb.define_metric("test_loss", step_metric="epoch")
     wandb.define_metric("loss", step_metric="epoch")
     wandb.define_metric("grad_norm", step_metric="epoch")
-    wandb.log({"theory_curves_init": wandb.Image(str(init_curves_path))}, step=0)
     save_epochs = set(SAVE_EPOCHS or ())
     optimizer = optim.Adam(student.parameters(), lr=LR)
     loss_fn = nn.MSELoss()
@@ -480,7 +436,6 @@ if __name__ == "__main__":
         LOSS_LOGLOG_PLOT_PATH,
     )
     print(f"Saved log-log loss plot to {plot_path}")
-    wandb.log({"loss_loglog": wandb.Image(str(plot_path))})
 
     torch.save(student.state_dict(), TRAINED_WEIGHTS_PATH)
     print(f"Saved trained weights to {TRAINED_WEIGHTS_PATH}")
