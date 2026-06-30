@@ -1,5 +1,6 @@
-"""Student f(x) = erf(w·x) - 2 erf(w·x/2) on teacher y = erf(x_1) - 2 erf(x_1/2). d=20."""
+"""Classic erf committee on teacher y = erf(x_1) - 2 erf(x_1/2). d=20, N=100, P=100 samples."""
 
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -9,16 +10,19 @@ import torch.optim as optim
 import wandb
 
 DIMENSION = 20
+N = 100
 W_STAR = torch.zeros(DIMENSION)
 W_STAR[0] = 1.0
 LR = 1e-4
 EPOCHS = 10_000
 SEED = 42
 INIT_SEED = 42
+INIT_MEAN = 0.0
+INIT_VAR = 1.0 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
 
 N_TRAIN_TOTAL = 10_000
 N_TEST_TOTAL = 5_000
-N_TRAIN_USED = 100
+P = 100
 N_TEST_USED = 100
 
 CACHE = Path(".cache").parent / "simple-committee-machine-erf-combo"
@@ -29,6 +33,8 @@ PRED_VS_THEORY_PLOT_PATH = CACHE / "pred_vs_theory.png"
 THEORY_CURVES_PLOT_PATH = CACHE / "theory_curves.png"
 WEIGHT_DISTRIBUTION_PLOT_PATH = CACHE / "weights_distribution.png"
 CHECKPOINT_DIR = CACHE / "checkpoints"
+
+WEIGHT_DIST_BINS = 30
 
 THEORY_GRID_POINTS = 500
 
@@ -42,17 +48,19 @@ LOAD_FROM = CACHE / "student_init.pt"
 # LOAD_FROM = None
 
 
-INIT_W = torch.zeros(DIMENSION)
+def sample_init_W(n: int, d: int) -> torch.Tensor:
+    g = torch.Generator().manual_seed(INIT_SEED)
+    return INIT_MEAN + math.sqrt(INIT_VAR) * torch.randn(n, d, generator=g)
 
 
 class CommitteeStudent(nn.Module):
-    def __init__(self, d):
+    def __init__(self, d, n):
         super().__init__()
-        self.W = nn.Parameter(INIT_W.clone())
+        self.scale = 1.0 / math.sqrt(n)
+        self.W = nn.Parameter(sample_init_W(n, d))
 
     def forward(self, x):
-        z = x @ self.W
-        return torch.erf(z) - 2.0 * torch.erf(0.5 * z)
+        return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
 
 
 def teacher_erf_combo(x: torch.Tensor) -> torch.Tensor:
@@ -152,23 +160,13 @@ def save_theory_stages_plot(
 
 
 def student_hidden_weights(student: CommitteeStudent) -> torch.Tensor:
-    """Learned weight vector w, shape (d,)."""
+    """Hidden weight vectors w_p for each unit, shape (N, d)."""
     return student.W.detach()
 
 
 def project_onto_w_star(w: torch.Tensor) -> torch.Tensor:
-    """Scalar alignment w·w* with the teacher direction."""
+    """Project each hidden weight row onto w*; returns shape (N,)."""
     return w @ W_STAR
-
-
-def format_weight_vector_text(w: torch.Tensor, max_values: int = 12) -> str:
-    values = [f"{v:.6f}" for v in w.tolist()]
-    if len(values) <= max_values:
-        inner = ", ".join(values)
-    else:
-        half = max_values // 2
-        inner = ", ".join(values[:half]) + ", ..., " + ", ".join(values[-half:])
-    return f"[{inner}]"
 
 
 def save_weight_distribution_plot(
@@ -176,78 +174,38 @@ def save_weight_distribution_plot(
     w_trained: torch.Tensor,
     path: Path,
 ) -> Path:
-    w_init_np = w_init.numpy()
-    w_trained_np = w_trained.numpy()
+    init_proj = project_onto_w_star(w_init).numpy()
+    trained_proj = project_onto_w_star(w_trained).numpy()
 
-    lo = min(w_init_np.min(), w_trained_np.min())
-    hi = max(w_init_np.max(), w_trained_np.max())
+    lo = min(init_proj.min(), trained_proj.min())
+    hi = max(init_proj.max(), trained_proj.max())
     if lo == hi:
         lo -= 0.5
         hi += 0.5
-    bins = 20
+    bins = WEIGHT_DIST_BINS
 
-    fig, axes = plt.subplots(2, 1, figsize=(8, 8))
-
-    axes[0].hist(
-        w_init_np,
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.hist(
+        init_proj,
         bins=bins,
         range=(lo, hi),
         alpha=0.6,
         label="initial",
         color="C0",
     )
-    axes[0].hist(
-        w_trained_np,
+    ax.hist(
+        trained_proj,
         bins=bins,
         range=(lo, hi),
         alpha=0.6,
         label="trained",
         color="C1",
     )
-    axes[0].set_xlabel(r"$w_i$")
-    axes[0].set_ylabel("count")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    x = list(range(len(w_init_np)))
-    width = 0.35
-    axes[1].bar(
-        [i - width / 2 for i in x],
-        w_init_np,
-        width,
-        label="initial",
-        color="C0",
-    )
-    axes[1].bar(
-        [i + width / 2 for i in x],
-        w_trained_np,
-        width,
-        label="trained",
-        color="C1",
-    )
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels([f"w_{i + 1}" for i in x])
-    axes[1].set_ylabel(r"$w_i$")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3, axis="y")
-
-    vector_text = (
-        f"init w:    {format_weight_vector_text(w_init)}\n"
-        f"trained w: {format_weight_vector_text(w_trained)}\n"
-        f"init w·w*: {project_onto_w_star(w_init).item():.6f}  "
-        f"trained w·w*: {project_onto_w_star(w_trained).item():.6f}"
-    )
-    fig.text(
-        0.5,
-        0.02,
-        vector_text,
-        ha="center",
-        va="bottom",
-        fontsize=9,
-        family="monospace",
-    )
-
-    fig.tight_layout(rect=[0, 0.08, 1, 1])
+    ax.set_xlabel(r"$w \cdot w^*$")
+    ax.set_ylabel("count")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -299,18 +257,23 @@ def analyze_convergence_to_theory(
     )
     scatter_path = save_pred_vs_theory_plot(y_test, y_student, PRED_VS_THEORY_PLOT_PATH)
 
-    w_dot_wstar = project_onto_w_star(student_hidden_weights(student)).item()
+    w_trained = project_onto_w_star(student_hidden_weights(student))
     print("Teacher comparison:")
     print(f"  trained_test_mse={trained_test_mse:.6f}")
     print(f"  trained_grid_mse={trained_grid_mse:.6f}")
     print(f"  saved theory curves to {curves_path}")
     print(f"  saved pred-vs-theory scatter to {scatter_path}")
-    print(f"  trained w·w*: {w_dot_wstar:.4f}")
+    print(
+        f"  trained w·w*: mean={w_trained.mean().item():.4f} "
+        f"std={w_trained.std().item():.4f} "
+        f"min={w_trained.min().item():.4f} max={w_trained.max().item():.4f}"
+    )
 
     return {
         "trained_test_mse": trained_test_mse,
         "trained_grid_mse": trained_grid_mse,
-        "trained_w_dot_wstar": w_dot_wstar,
+        "trained_w_mean": w_trained.mean().item(),
+        "trained_w_std": w_trained.std().item(),
     }
 
 
@@ -328,14 +291,27 @@ def data_cache_valid() -> bool:
 
 
 def ensure_init_weights() -> None:
-    """Cache fixed init w = 0 for all runs."""
+    """Sample init once from N(INIT_MEAN, INIT_VAR), cache for all runs."""
     if INIT_WEIGHTS_PATH.exists():
         state = torch.load(INIT_WEIGHTS_PATH, weights_only=True)
-        if state["W"].shape == (DIMENSION,) and torch.allclose(state["W"], INIT_W):
+        if (
+            state["W"].shape == (N, DIMENSION)
+            and state.get("init_seed") == INIT_SEED
+            and state.get("init_mean") == INIT_MEAN
+            and state.get("init_var") == INIT_VAR
+        ):
             return
-        print("Regenerating init weights (cached w shape or values mismatch)")
-    student = CommitteeStudent(DIMENSION)
-    torch.save(student.state_dict(), INIT_WEIGHTS_PATH)
+        print("Regenerating init weights (cached init mismatch)")
+    student = CommitteeStudent(DIMENSION, N)
+    torch.save(
+        {
+            "W": student.W.detach().clone(),
+            "init_seed": INIT_SEED,
+            "init_mean": INIT_MEAN,
+            "init_var": INIT_VAR,
+        },
+        INIT_WEIGHTS_PATH,
+    )
     print(f"Saved init weights to {INIT_WEIGHTS_PATH}")
 
 
@@ -349,11 +325,15 @@ def resolve_checkpoint(load_from: str | Path | None) -> Path:
 
 def load_student(load_from: str | Path | None) -> tuple[CommitteeStudent, Path]:
     ensure_init_weights()
-    student = CommitteeStudent(DIMENSION)
+    student = CommitteeStudent(DIMENSION, N)
     path = resolve_checkpoint(load_from)
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
-    student.load_state_dict(torch.load(path, weights_only=True))
+    state = torch.load(path, weights_only=True)
+    if "init_seed" in state:
+        student.load_state_dict({"W": state["W"]})
+    else:
+        student.load_state_dict(state)
     print(f"Loaded weights from {path}")
     return student, path
 
@@ -387,7 +367,7 @@ if __name__ == "__main__":
         torch.save(x_train, CACHE / "x_train.pt")
         torch.save(x_test, CACHE / "x_test.pt")
 
-    x_train = x_train[:N_TRAIN_USED]
+    x_train = x_train[:P]
     x_test = x_test[:N_TEST_USED]
     y_train = teacher_erf_combo(x_train)
     y_test = teacher_erf_combo(x_test)
@@ -410,13 +390,16 @@ if __name__ == "__main__":
         config={
             "task": "erf_combo",
             "dimension": DIMENSION,
-            "student": "erf(w·x) - 2 erf(w·x/2)",
+            "N": N,
+            "P": P,
+            "student": "(1/sqrt(N)) sum_p erf(w_p·x)",
             "lr": LR,
             "optimizer": "adam",
             "epochs": EPOCHS,
-            "n_train_used": N_TRAIN_USED,
             "n_test_used": N_TEST_USED,
             "init_seed": INIT_SEED,
+            "init_mean": INIT_MEAN,
+            "init_var": INIT_VAR,
             "loaded_from": str(loaded_from),
             "save_epochs": SAVE_EPOCHS,
         },
@@ -481,8 +464,16 @@ if __name__ == "__main__":
         w_init, w_trained, WEIGHT_DISTRIBUTION_PLOT_PATH
     )
     print(f"Saved weight distribution plot to {weight_plot_path}")
-    print(f"  init w·w*: {project_onto_w_star(w_init).item():.6f}")
-    print(f"  trained w·w*: {project_onto_w_star(w_trained).item():.6f}")
+    w_init_proj = project_onto_w_star(w_init)
+    w_trained_proj = project_onto_w_star(w_trained)
+    print(
+        f"  init w·w*: mean={w_init_proj.mean().item():.4f} "
+        f"std={w_init_proj.std().item():.4f}"
+    )
+    print(
+        f"  trained w·w*: mean={w_trained_proj.mean().item():.4f} "
+        f"std={w_trained_proj.std().item():.4f}"
+    )
 
     wandb.run.summary.update({"init_grid_mse": init_grid_mse, **theory_metrics})
     wandb.log(
