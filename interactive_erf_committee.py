@@ -10,14 +10,22 @@ import curses
 import queue
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import wandb
 
 from erf_combo_commette_machine import (
     CACHE,
     DIMENSION,
+    INIT_MANUAL_NOISE_VAR,
+    INIT_MEAN,
+    INIT_MODE,
+    INIT_SEED,
+    INIT_VAR,
+    INIT_W_MANUAL,
     LR,
     N,
     N_TEST_TOTAL,
@@ -34,6 +42,10 @@ from erf_combo_commette_machine import (
     make_theory_grid,
     mse_vs_teacher,
     project_onto_w_star,
+    save_loss_loglog_plot,
+    save_pred_vs_theory_plot,
+    save_theory_stages_plot,
+    save_weight_distribution_plot,
     student_hidden_weights,
     teacher_erf_combo,
 )
@@ -64,6 +76,15 @@ EPOCHS_PER_UI_TICK = 10
 MAX_EPOCHS: int | None = None
 PAUSE_ON_START = False
 UI_REFRESH_MS = 100
+
+WANDB_PROJECT = "committee-student"
+WANDB_RUN_NAME = "erf_combo_interactive"
+
+INTERACTIVE_PLOT_DIR = CACHE / "interactive"
+LOSS_LOGLOG_PLOT_PATH = INTERACTIVE_PLOT_DIR / "loss_loglog.png"
+PRED_VS_THEORY_PLOT_PATH = INTERACTIVE_PLOT_DIR / "pred_vs_theory.png"
+THEORY_CURVES_PLOT_PATH = INTERACTIVE_PLOT_DIR / "theory_curves.png"
+WEIGHT_DISTRIBUTION_PLOT_PATH = INTERACTIVE_PLOT_DIR / "weights_distribution.png"
 
 # Sample x1 values shown in the terminal curve panel
 CURVE_SAMPLE_X1 = [-2.0, -1.0, 0.0, 1.0, 2.0]
@@ -249,19 +270,31 @@ def training_loop(
                     loss = loss_fn(student(x_train), y_train)
                     optimizer.zero_grad()
                     loss.backward()
+                    grad_norm = student.W.grad.pow(2).sum().item()
                     optimizer.step()
 
                     with torch.no_grad():
                         test_loss = loss_fn(student(x_test), y_test).item()
                         grid_mse = mse_vs_teacher(student(x_grid), x_grid)
 
+                    epoch_idx = state.epoch
                     state.epoch += 1
                     state.train_loss = loss.item()
                     state.test_loss = test_loss
                     state.grid_mse = grid_mse
-                    state.epochs_hist.append(state.epoch)
+                    state.epochs_hist.append(epoch_idx)
                     state.train_loss_hist.append(state.train_loss)
                     state.test_loss_hist.append(state.test_loss)
+
+                    if wandb.run is not None:
+                        wandb.log(
+                            {
+                                "epoch": epoch_idx,
+                                "loss": state.train_loss,
+                                "test_loss": state.test_loss,
+                                "grad_norm": grad_norm,
+                            }
+                        )
 
         threading.Event().wait(0.01)
 
@@ -439,6 +472,136 @@ class TerminalDashboard:
             self._draw(stdscr)
 
 
+def init_wandb(loaded_from: Path) -> None:
+    wandb.init(
+        project=WANDB_PROJECT,
+        name=WANDB_RUN_NAME,
+        config={
+            "task": "erf_combo_interactive",
+            "mode": "interactive",
+            "dimension": DIMENSION,
+            "N": N,
+            "P": P,
+            "student": "(1/sqrt(N)) sum_p erf(w_p·x)",
+            "lr": LR,
+            "optimizer": OPTIMIZER,
+            "max_epochs": MAX_EPOCHS,
+            "epochs_per_ui_tick": EPOCHS_PER_UI_TICK,
+            "n_test_used": N_TEST_USED,
+            "init_seed": INIT_SEED,
+            "init_mean": INIT_MEAN,
+            "init_var": INIT_VAR,
+            "init_mode": INIT_MODE,
+            "init_w_manual": INIT_W_MANUAL,
+            "init_manual_noise_var": INIT_MANUAL_NOISE_VAR,
+            "checkpoint": str(CHECKPOINT),
+            "loaded_from": str(loaded_from),
+            "weight_presets": WEIGHT_PRESETS,
+        },
+    )
+    wandb.define_metric("epoch")
+    wandb.define_metric("test_loss", step_metric="epoch")
+    wandb.define_metric("loss", step_metric="epoch")
+    wandb.define_metric("grad_norm", step_metric="epoch")
+
+
+def finalize_wandb_run(
+    student: CommitteeStudent,
+    x_test: torch.Tensor,
+    y_student_init: torch.Tensor,
+    w_init: torch.Tensor,
+    state: TrainingState,
+    start_grid_mse: float,
+) -> None:
+    if wandb.run is None:
+        return
+
+    INTERACTIVE_PLOT_DIR.mkdir(parents=True, exist_ok=True)
+
+    plot_path = save_loss_loglog_plot(
+        state.epochs_hist,
+        state.train_loss_hist,
+        state.test_loss_hist,
+        LOSS_LOGLOG_PLOT_PATH,
+    )
+    print(f"Saved log-log loss plot to {plot_path}")
+
+    student.eval()
+    with torch.no_grad():
+        y_test = teacher_erf_combo(x_test)
+        y_student = student(x_test)
+        trained_test_mse = mse_vs_teacher(y_student, x_test)
+
+        x_grid = make_theory_grid()
+        y_teacher_grid = teacher_erf_combo(x_grid)
+        y_student_grid = student(x_grid)
+        trained_grid_mse = mse_vs_teacher(y_student_grid, x_grid)
+
+    curves_path = save_theory_stages_plot(
+        x_grid,
+        y_teacher_grid,
+        y_student_init,
+        y_student_grid,
+        THEORY_CURVES_PLOT_PATH,
+    )
+    scatter_path = save_pred_vs_theory_plot(
+        y_test, y_student, PRED_VS_THEORY_PLOT_PATH
+    )
+
+    w_trained = project_onto_w_star(student_hidden_weights(student))
+    theory_metrics = {
+        "trained_test_mse": trained_test_mse,
+        "trained_grid_mse": trained_grid_mse,
+        "trained_w_mean": w_trained.mean().item(),
+        "trained_w_std": w_trained.std().item(),
+    }
+
+    print("Teacher comparison:")
+    print(f"  trained_test_mse={trained_test_mse:.6f}")
+    print(f"  trained_grid_mse={trained_grid_mse:.6f}")
+    print(f"  saved theory curves to {curves_path}")
+    print(f"  saved pred-vs-theory scatter to {scatter_path}")
+    print(
+        f"  trained w·w*: mean={w_trained.mean().item():.4f} "
+        f"std={w_trained.std().item():.4f} "
+        f"min={w_trained.min().item():.4f} max={w_trained.max().item():.4f}"
+    )
+
+    w_trained_weights = student_hidden_weights(student)
+    weight_plot_path = save_weight_distribution_plot(
+        w_init, w_trained_weights, WEIGHT_DISTRIBUTION_PLOT_PATH
+    )
+    print(f"Saved weight distribution plot to {weight_plot_path}")
+
+    w_init_proj = project_onto_w_star(w_init)
+    w_trained_proj = project_onto_w_star(w_trained_weights)
+    print(
+        f"  session-start w·w*: mean={w_init_proj.mean().item():.4f} "
+        f"std={w_init_proj.std().item():.4f}"
+    )
+    print(
+        f"  trained w·w*: mean={w_trained_proj.mean().item():.4f} "
+        f"std={w_trained_proj.std().item():.4f}"
+    )
+
+    wandb.run.summary.update(
+        {
+            "init_grid_mse": start_grid_mse,
+            "interactive_epochs": state.epoch,
+            "stop_reason": state.stop_reason,
+            **theory_metrics,
+        }
+    )
+    wandb.log(
+        {
+            "weights_distribution": wandb.Image(str(weight_plot_path)),
+            "pred_vs_theory": wandb.Image(str(scatter_path)),
+            "theory_curves": wandb.Image(str(curves_path)),
+        }
+    )
+    wandb.finish()
+
+
 def main() -> None:
     validate_weight_presets(WEIGHT_PRESETS, N, DIMENSION)
     print_key_map(WEIGHT_PRESETS)
@@ -457,12 +620,15 @@ def main() -> None:
         y_student_start = student(x_grid).clone()
         init_test_mse = mse_vs_teacher(student(x_test), x_test)
         start_grid_mse = mse_vs_teacher(y_student_start, x_grid)
+    w_init = student_hidden_weights(student).clone()
     print(f"checkpoint test MSE={init_test_mse:.6f}")
     if MAX_EPOCHS is None:
         print("Training runs until you press q (no epoch limit).")
     else:
         print(f"Training stops after MAX_EPOCHS={MAX_EPOCHS} or when you press q.")
     print("Starting terminal UI...")
+
+    init_wandb(loaded_from)
 
     optimizer = make_optimizer(student.parameters(), LR, OPTIMIZER)
     loss_fn = nn.MSELoss()
@@ -501,6 +667,15 @@ def main() -> None:
     train_thread.join(timeout=2.0)
     reason = state.stop_reason or "terminal UI exited"
     print(f"Stopped at epoch {state.epoch} ({reason})")
+
+    finalize_wandb_run(
+        student,
+        x_test,
+        y_student_start,
+        w_init,
+        state,
+        start_grid_mse,
+    )
 
 
 if __name__ == "__main__":
