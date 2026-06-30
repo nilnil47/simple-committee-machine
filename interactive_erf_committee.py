@@ -1,16 +1,16 @@
 """Interactive continued training with keyboard weight injection.
 
 Load a trained checkpoint, keep training, and hard-snap hidden weight rows to
-preset targets on keypress while watching loss, prediction curves, and w·w*.
+preset targets on keypress while watching loss, curves, and w·w* in the terminal.
 """
 
 from __future__ import annotations
 
+import curses
 import queue
 import threading
 from dataclasses import dataclass, field
 
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -60,16 +60,18 @@ WEIGHT_PRESETS: dict[str, tuple[int, list[float]]] = {
 
 CHECKPOINT = TRAINED_WEIGHTS_PATH
 EPOCHS_PER_UI_TICK = 10
-# None = train until you close the plot window or press q; set e.g. 10_000 for a fixed cap
-MAX_EPOCHS: int | None = 10_000
+# None = train until q; set e.g. 10_000 for a fixed cap
+MAX_EPOCHS: int | None = None
 PAUSE_ON_START = False
 UI_REFRESH_MS = 100
+
+# Sample x1 values shown in the terminal curve panel
+CURVE_SAMPLE_X1 = [-2.0, -1.0, 0.0, 1.0, 2.0]
 
 
 def validate_weight_presets(
     presets: dict[str, tuple[int, list[float]]], n: int, d: int
 ) -> None:
-    seen_units: set[int] = set()
     for key, (unit_idx, target) in presets.items():
         if unit_idx < 0 or unit_idx >= n:
             raise ValueError(
@@ -79,7 +81,6 @@ def validate_weight_presets(
             raise ValueError(
                 f"WEIGHT_PRESETS[{key!r}] target must have length d={d}, got {len(target)}"
             )
-        seen_units.add(unit_idx)
 
 
 def print_key_map(presets: dict[str, tuple[int, list[float]]]) -> None:
@@ -102,6 +103,32 @@ def _format_vector_preview(target: list[float], max_dims: int = 4) -> str:
     if len(target) > max_dims:
         head += ", ..."
     return f"[{head}]"
+
+
+def sparkline(values: list[float], width: int = 50) -> str:
+    if not values:
+        return "(no data yet)"
+    sample = values[-width:]
+    lo = min(sample)
+    hi = max(sample)
+    if hi - lo < 1e-12:
+        return "▁" * len(sample)
+    levels = " ▁▂▃▄▅▆▇█"
+    out: list[str] = []
+    for value in sample:
+        t = (value - lo) / (hi - lo)
+        idx = min(len(levels) - 1, int(t * (len(levels) - 1)))
+        out.append(levels[idx])
+    return "".join(out)
+
+
+def ascii_bar(value: float, vmin: float, vmax: float, width: int = 16) -> str:
+    if vmax - vmin < 1e-12:
+        filled = width // 2
+    else:
+        filled = int((value - vmin) / (vmax - vmin) * width)
+    filled = max(0, min(width, filled))
+    return "#" * filled + "-" * (width - filled)
 
 
 def reset_adam_row(
@@ -142,6 +169,7 @@ class TrainingState:
     epoch: int = 0
     train_loss: float = 0.0
     test_loss: float = 0.0
+    grid_mse: float = 0.0
     epochs_hist: list[int] = field(default_factory=list)
     train_loss_hist: list[float] = field(default_factory=list)
     test_loss_hist: list[float] = field(default_factory=list)
@@ -170,6 +198,12 @@ def load_training_data() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torc
     return x_train, y_train, x_test, y_test
 
 
+def make_curve_sample_grid(x1_values: list[float]) -> torch.Tensor:
+    grid = torch.zeros(len(x1_values), DIMENSION)
+    grid[:, 0] = torch.tensor(x1_values, dtype=torch.float32)
+    return grid
+
+
 def drain_injections(
     student: CommitteeStudent,
     optimizer: optim.Optimizer,
@@ -193,6 +227,7 @@ def training_loop(
     y_train: torch.Tensor,
     x_test: torch.Tensor,
     y_test: torch.Tensor,
+    x_grid: torch.Tensor,
     state: TrainingState,
 ) -> None:
     while not state.stop:
@@ -218,10 +253,12 @@ def training_loop(
 
                     with torch.no_grad():
                         test_loss = loss_fn(student(x_test), y_test).item()
+                        grid_mse = mse_vs_teacher(student(x_grid), x_grid)
 
                     state.epoch += 1
                     state.train_loss = loss.item()
                     state.test_loss = test_loss
+                    state.grid_mse = grid_mse
                     state.epochs_hist.append(state.epoch)
                     state.train_loss_hist.append(state.train_loss)
                     state.test_loss_hist.append(state.test_loss)
@@ -229,7 +266,7 @@ def training_loop(
         threading.Event().wait(0.01)
 
 
-class InteractiveDashboard:
+class TerminalDashboard:
     def __init__(
         self,
         student: CommitteeStudent,
@@ -237,86 +274,24 @@ class InteractiveDashboard:
         x_grid: torch.Tensor,
         y_teacher_grid: torch.Tensor,
         y_student_start: torch.Tensor,
+        curve_sample_grid: torch.Tensor,
+        y_teacher_sample: torch.Tensor,
+        start_grid_mse: float,
     ) -> None:
         self.student = student
         self.state = state
         self.x_grid = x_grid
         self.y_teacher_grid = y_teacher_grid
         self.y_student_start = y_student_start
-        self.xs = x_grid[:, 0].numpy()
+        self.curve_sample_grid = curve_sample_grid
+        self.y_teacher_sample = y_teacher_sample
+        self.start_grid_mse = start_grid_mse
 
-        self.fig, self.axes = plt.subplots(3, 1, figsize=(9, 10))
-        self._setup_axes()
-        self.fig.canvas.mpl_connect("key_press_event", self._on_key_press)
-        self.timer = self.fig.canvas.new_timer(interval=UI_REFRESH_MS)
-        self.timer.add_callback(self._refresh)
-        self.timer.start()
+    def run(self) -> None:
+        curses.wrapper(self._main)
 
-    def _setup_axes(self) -> None:
-        ax_loss, ax_curve, ax_weights = self.axes
-
-        (self.train_line,) = ax_loss.plot([], [], label="train loss", color="C0")
-        (self.test_line,) = ax_loss.plot([], [], label="test loss", color="C1")
-        ax_loss.set_xlabel("epoch")
-        ax_loss.set_ylabel("MSE")
-        ax_loss.legend(loc="upper right")
-        ax_loss.grid(True, alpha=0.3)
-        self.status_text = ax_loss.text(
-            0.02,
-            0.98,
-            "",
-            transform=ax_loss.transAxes,
-            va="top",
-            fontsize=9,
-            bbox={"facecolor": "wheat", "alpha": 0.8, "pad": 4},
-        )
-
-        ax_curve.plot(
-            self.xs,
-            self.y_teacher_grid.numpy(),
-            label="teacher",
-            color="C2",
-            linewidth=2.0,
-        )
-        (self.start_curve,) = ax_curve.plot(
-            self.xs,
-            self.y_student_start.numpy(),
-            label="start (checkpoint)",
-            color="C0",
-            linewidth=1.0,
-            alpha=0.5,
-            linestyle="--",
-        )
-        (self.student_curve,) = ax_curve.plot(
-            [], [], label="student", color="C0", linewidth=1.5
-        )
-        ax_curve.set_xlabel(r"$x_1$")
-        ax_curve.set_ylabel("f(x)")
-        ax_curve.legend(loc="upper left")
-        ax_curve.grid(True, alpha=0.3)
-
-        unit_labels = [str(i) for i in range(N)]
-        self.weight_bars = ax_weights.bar(
-            range(N),
-            project_onto_w_star(student_hidden_weights(self.student)).numpy(),
-            color="C0",
-            alpha=0.85,
-        )
-        ax_weights.set_xticks(range(N))
-        ax_weights.set_xticklabels(unit_labels)
-        ax_weights.set_xlabel("hidden unit")
-        ax_weights.set_ylabel(r"$w_p \cdot w^*$")
-        ax_weights.set_title("weight projections")
-        ax_weights.grid(True, axis="y", alpha=0.3)
-
-        self.fig.tight_layout()
-
-    def _on_key_press(self, event) -> None:
-        if event.key is None:
-            return
-
-        key = event.key
-        if key == " ":
+    def _handle_key(self, key: int) -> None:
+        if key == ord(" "):
             with self.state.lock:
                 self.state.paused = not self.state.paused
                 self.state.status_message = (
@@ -324,73 +299,144 @@ class InteractiveDashboard:
                 )
             return
 
-        if key == "q":
+        if key in (ord("q"), ord("Q")):
             self.state.stop = True
             self.state.stop_reason = "quit key"
             self.state.status_message = "quitting"
-            plt.close(self.fig)
             return
 
-        preset = WEIGHT_PRESETS.get(key)
+        if key == curses.KEY_RESIZE:
+            return
+
+        ch = chr(key) if 32 <= key < 127 else None
+        if ch is None:
+            return
+
+        preset = WEIGHT_PRESETS.get(ch)
         if preset is not None:
             unit_idx, target = preset
             self.state.injection_queue.put((unit_idx, target))
             self.state.status_message = f"queued unit {unit_idx}"
 
-    def _refresh(self) -> None:
-        if not plt.fignum_exists(self.fig.number):
-            self.state.stop = True
-            self.state.stop_reason = "plot window closed"
+    def _put_line(self, stdscr, row: int, text: str) -> None:
+        height, width = stdscr.getmaxyx()
+        if row >= height:
             return
+        stdscr.move(row, 0)
+        stdscr.clrtoeol()
+        stdscr.addstr(row, 0, text[: max(0, width - 1)])
 
+    def _draw(self, stdscr) -> None:
         with self.state.lock:
-            epochs = list(self.state.epochs_hist)
-            train_losses = list(self.state.train_loss_hist)
-            test_losses = list(self.state.test_loss_hist)
-            status = self.state.status_message
-            paused = self.state.paused
-            last_unit = self.state.last_injected_unit
             epoch = self.state.epoch
             train_loss = self.state.train_loss
             test_loss = self.state.test_loss
+            grid_mse = self.state.grid_mse
+            status = self.state.status_message
+            paused = self.state.paused
+            last_unit = self.state.last_injected_unit
+            train_hist = list(self.state.train_loss_hist)
+            test_hist = list(self.state.test_loss_hist)
 
-        self.train_line.set_data(epochs, train_losses)
-        self.test_line.set_data(epochs, test_losses)
-        if epochs:
-            self.axes[0].relim()
-            self.axes[0].autoscale_view()
-
-        pause_suffix = " [PAUSED]" if paused else ""
-        self.status_text.set_text(
-            f"epoch={epoch}  train={train_loss:.4f}  test={test_loss:.4f}"
-            f"  {status}{pause_suffix}"
+        pause_tag = " [PAUSED]" if paused else ""
+        row = 0
+        self._put_line(stdscr, row, "Interactive committee training (terminal)")
+        row += 1
+        self._put_line(
+            stdscr,
+            row,
+            f"epoch={epoch}  train={train_loss:.6f}  test={test_loss:.6f}  "
+            f"grid_mse={grid_mse:.6f}  {status}{pause_tag}",
         )
+        row += 1
+        self._put_line(
+            stdscr,
+            row,
+            "Keys: 1-9,0,a-f inject | space pause | q quit",
+        )
+        row += 1
+        self._put_line(stdscr, row, "")
+        row += 1
+
+        self._put_line(stdscr, row, "Train loss (recent)")
+        row += 1
+        self._put_line(stdscr, row, sparkline(train_hist))
+        row += 1
+        self._put_line(stdscr, row, "Test loss (recent)")
+        row += 1
+        self._put_line(stdscr, row, sparkline(test_hist))
+        row += 1
+        self._put_line(stdscr, row, "")
+        row += 1
 
         self.student.eval()
         with torch.no_grad():
-            y_student = self.student(self.x_grid).numpy()
-        self.student_curve.set_data(self.xs, y_student)
-        self.axes[1].relim()
-        self.axes[1].autoscale_view()
+            y_student_sample = self.student(self.curve_sample_grid)
+            current_grid_mse = mse_vs_teacher(self.student(self.x_grid), self.x_grid)
 
-        w_proj = project_onto_w_star(student_hidden_weights(self.student)).numpy()
-        for bar, value in zip(self.weight_bars, w_proj):
-            bar.set_height(value)
-        if last_unit is not None:
-            for i, bar in enumerate(self.weight_bars):
-                bar.set_color("C3" if i == last_unit else "C0")
-                bar.set_alpha(1.0 if i == last_unit else 0.85)
-        y_lo = min(w_proj.min(), 0.0)
-        y_hi = max(w_proj.max(), 0.0)
-        if y_lo == y_hi:
-            y_lo -= 0.5
-            y_hi += 0.5
-        self.axes[2].set_ylim(y_lo, y_hi)
+        self._put_line(
+            stdscr,
+            row,
+            f"Theory grid MSE: start={self.start_grid_mse:.6f}  now={current_grid_mse:.6f}",
+        )
+        row += 1
+        header = "x1     " + " ".join(f"{x:>7.1f}" for x in CURVE_SAMPLE_X1)
+        self._put_line(stdscr, row, header)
+        row += 1
+        teacher_vals = self.y_teacher_sample.tolist()
+        student_vals = y_student_sample.tolist()
+        self._put_line(
+            stdscr,
+            row,
+            "teacher" + "".join(f"{v:>8.3f}" for v in teacher_vals),
+        )
+        row += 1
+        self._put_line(
+            stdscr,
+            row,
+            "student" + "".join(f"{v:>8.3f}" for v in student_vals),
+        )
+        row += 1
+        self._put_line(stdscr, row, "")
+        row += 1
 
-        self.fig.canvas.draw_idle()
+        w_proj = project_onto_w_star(student_hidden_weights(self.student)).tolist()
+        w_min = min(w_proj)
+        w_max = max(w_proj)
+        if abs(w_max - w_min) < 1e-12:
+            w_min -= 0.5
+            w_max += 0.5
 
-    def show(self) -> None:
-        plt.show()
+        self._put_line(stdscr, row, "Weight projections w_p · w*  (* = last injected)")
+        row += 1
+        height, _ = stdscr.getmaxyx()
+        for unit_idx, value in enumerate(w_proj):
+            if row >= height - 1:
+                break
+            mark = "*" if unit_idx == last_unit else " "
+            bar = ascii_bar(value, w_min, w_max)
+            self._put_line(
+                stdscr,
+                row,
+                f"u{unit_idx:02d} [{bar}] {value:+.4f}{mark}",
+            )
+            row += 1
+
+        stdscr.refresh()
+
+    def _main(self, stdscr) -> None:
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        stdscr.nodelay(False)
+        stdscr.timeout(UI_REFRESH_MS)
+
+        while not self.state.stop:
+            key = stdscr.getch()
+            if key != -1:
+                self._handle_key(key)
+            self._draw(stdscr)
 
 
 def main() -> None:
@@ -403,18 +449,20 @@ def main() -> None:
 
     x_grid = make_theory_grid()
     y_teacher_grid = teacher_erf_combo(x_grid)
+    curve_sample_grid = make_curve_sample_grid(CURVE_SAMPLE_X1)
+    y_teacher_sample = teacher_erf_combo(curve_sample_grid)
+
     student.eval()
     with torch.no_grad():
         y_student_start = student(x_grid).clone()
         init_test_mse = mse_vs_teacher(student(x_test), x_test)
+        start_grid_mse = mse_vs_teacher(y_student_start, x_grid)
     print(f"checkpoint test MSE={init_test_mse:.6f}")
     if MAX_EPOCHS is None:
-        print(
-            "Training runs until you close the plot window or press q "
-            "(no epoch limit — keep the window open)."
-        )
+        print("Training runs until you press q (no epoch limit).")
     else:
-        print(f"Training stops after MAX_EPOCHS={MAX_EPOCHS} or when the window closes.")
+        print(f"Training stops after MAX_EPOCHS={MAX_EPOCHS} or when you press q.")
+    print("Starting terminal UI...")
 
     optimizer = make_optimizer(student.parameters(), LR, OPTIMIZER)
     loss_fn = nn.MSELoss()
@@ -422,19 +470,36 @@ def main() -> None:
 
     train_thread = threading.Thread(
         target=training_loop,
-        args=(student, optimizer, loss_fn, x_train, y_train, x_test, y_test, state),
+        args=(
+            student,
+            optimizer,
+            loss_fn,
+            x_train,
+            y_train,
+            x_test,
+            y_test,
+            x_grid,
+            state,
+        ),
         daemon=True,
     )
     train_thread.start()
 
-    dashboard = InteractiveDashboard(
-        student, state, x_grid, y_teacher_grid, y_student_start
+    dashboard = TerminalDashboard(
+        student,
+        state,
+        x_grid,
+        y_teacher_grid,
+        y_student_start,
+        curve_sample_grid,
+        y_teacher_sample,
+        start_grid_mse,
     )
-    dashboard.show()
+    dashboard.run()
 
     state.stop = True
     train_thread.join(timeout=2.0)
-    reason = state.stop_reason or "plot window closed"
+    reason = state.stop_reason or "terminal UI exited"
     print(f"Stopped at epoch {state.epoch} ({reason})")
 
 
