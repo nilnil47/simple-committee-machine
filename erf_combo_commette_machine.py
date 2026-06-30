@@ -114,27 +114,56 @@ def save_loss_loglog_plot(
     return path
 
 
-def save_theory_curves_plot(
+def save_teacher_student_curve_plot(
     x: torch.Tensor,
     y_teacher: torch.Tensor,
     y_student: torch.Tensor,
     path: Path,
-    student_label: str = "trained student",
+    student_label: str = "student",
+) -> Path:
+    xs = x[:, 0].numpy()
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(xs, y_teacher.numpy(), label="teacher y(x)", linewidth=2.0)
+    ax.plot(xs, y_student.numpy(), label=student_label, linewidth=1.5, alpha=0.85)
+    ax.set_xlabel("x")
+    ax.set_ylabel("f(x)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def save_theory_stages_plot(
+    x: torch.Tensor,
+    y_teacher: torch.Tensor,
+    y_student_init: torch.Tensor,
+    y_student_trained: torch.Tensor,
+    path: Path,
 ) -> Path:
     xs = x[:, 0].numpy()
     fig, axes = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
 
     axes[0].plot(xs, y_teacher.numpy(), label="teacher y(x)", linewidth=2.0)
-    axes[0].plot(xs, y_student.numpy(), label=student_label, linewidth=1.5, alpha=0.85)
+    axes[0].plot(
+        xs, y_student_init.numpy(), label="initial student", linewidth=1.5, alpha=0.85
+    )
     axes[0].set_ylabel("f(x)")
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
 
-    residual = y_student - y_teacher
-    axes[1].plot(xs, residual.numpy(), label="student - teacher", linewidth=1.5)
-    axes[1].axhline(0.0, color="black", linewidth=0.8)
+    axes[1].plot(xs, y_teacher.numpy(), label="teacher y(x)", linewidth=2.0)
+    axes[1].plot(
+        xs,
+        y_student_trained.numpy(),
+        label="trained student",
+        linewidth=1.5,
+        alpha=0.85,
+    )
     axes[1].set_xlabel("x")
-    axes[1].set_ylabel("residual")
+    axes[1].set_ylabel("f(x)")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
 
@@ -143,6 +172,18 @@ def save_theory_curves_plot(
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
+
+
+def save_theory_curves_plot(
+    x: torch.Tensor,
+    y_teacher: torch.Tensor,
+    y_student: torch.Tensor,
+    path: Path,
+    student_label: str = "trained student",
+) -> Path:
+    return save_teacher_student_curve_plot(
+        x, y_teacher, y_student, path, student_label=student_label
+    )
 
 
 def student_hidden_weights(student: CommitteeStudent) -> torch.Tensor:
@@ -234,6 +275,7 @@ def save_pred_vs_theory_plot(
 def analyze_convergence_to_theory(
     student: CommitteeStudent,
     x_test: torch.Tensor,
+    y_student_init: torch.Tensor,
 ) -> dict[str, float]:
     """Compare trained student to the erf-combo teacher."""
     student.eval()
@@ -247,9 +289,10 @@ def analyze_convergence_to_theory(
         y_student_grid = student(x_grid)
         trained_grid_mse = mse_vs_teacher(y_student_grid, x_grid)
 
-    curves_path = save_theory_curves_plot(
+    curves_path = save_theory_stages_plot(
         x_grid,
         y_teacher_grid,
+        y_student_init,
         y_student_grid,
         THEORY_CURVES_PLOT_PATH,
     )
@@ -442,7 +485,7 @@ if __name__ == "__main__":
     torch.save(student.state_dict(), TRAINED_WEIGHTS_PATH)
     print(f"Saved trained weights to {TRAINED_WEIGHTS_PATH}")
 
-    theory_metrics = analyze_convergence_to_theory(student, x_test)
+    theory_metrics = analyze_convergence_to_theory(student, x_test, y_student_init)
 
     w_trained = student_hidden_weights(student)
     weight_plot_path = save_weight_distribution_plot(
