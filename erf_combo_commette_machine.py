@@ -40,6 +40,9 @@ INIT_W_MANUAL: list[float] | list[list[float]] | None = (
     + [[-0.5] + [0.0] * (DIMENSION - 1)] * 8
     + [[0.0] * DIMENSION] * 4
 )
+# Gaussian noise on manual init: std = sqrt(INIT_MANUAL_NOISE_VAR); 0 for exact manual values
+INIT_MANUAL_NOISE_VAR = 0.2 / DIMENSION
+# INIT_MANUAL_NOISE_VAR = 0.00
 # INIT_MODE = "manual"
 # INIT_W_MANUAL = [1.0, -0.5, -0.5] + [0.0] * (N - 3)
 
@@ -84,19 +87,24 @@ def manual_init_W(n: int, d: int) -> torch.Tensor:
             f"INIT_W_MANUAL must have length N={n}, got {len(INIT_W_MANUAL)}"
         )
     if d == 1:
-        return torch.tensor(INIT_W_MANUAL, dtype=torch.float32).reshape(n, d)
-    rows: list[list[float]] = []
-    for i, row in enumerate(INIT_W_MANUAL):
-        if isinstance(row, (int, float)):
-            raise ValueError(
-                f"INIT_W_MANUAL[{i}] must be a length-{d} list when DIMENSION > 1"
-            )
-        if len(row) != d:
-            raise ValueError(
-                f"INIT_W_MANUAL[{i}] must have length d={d}, got {len(row)}"
-            )
-        rows.append([float(v) for v in row])
-    return torch.tensor(rows, dtype=torch.float32)
+        W = torch.tensor(INIT_W_MANUAL, dtype=torch.float32).reshape(n, d)
+    else:
+        rows: list[list[float]] = []
+        for i, row in enumerate(INIT_W_MANUAL):
+            if isinstance(row, (int, float)):
+                raise ValueError(
+                    f"INIT_W_MANUAL[{i}] must be a length-{d} list when DIMENSION > 1"
+                )
+            if len(row) != d:
+                raise ValueError(
+                    f"INIT_W_MANUAL[{i}] must have length d={d}, got {len(row)}"
+                )
+            rows.append([float(v) for v in row])
+        W = torch.tensor(rows, dtype=torch.float32)
+    if INIT_MANUAL_NOISE_VAR > 0:
+        g = torch.Generator().manual_seed(INIT_SEED)
+        W = W + math.sqrt(INIT_MANUAL_NOISE_VAR) * torch.randn(n, d, generator=g)
+    return W
 
 
 def make_init_W(n: int, d: int) -> torch.Tensor:
@@ -349,7 +357,11 @@ def _init_cache_matches(state: dict) -> bool:
             and state.get("init_var") == INIT_VAR
         )
     if INIT_MODE == "manual":
-        return torch.allclose(state["W"], make_init_W(N, DIMENSION))
+        return (
+            state.get("init_seed") == INIT_SEED
+            and state.get("init_manual_noise_var") == INIT_MANUAL_NOISE_VAR
+            and torch.allclose(state["W"], make_init_W(N, DIMENSION))
+        )
     return False
 
 
@@ -371,6 +383,13 @@ def ensure_init_weights() -> None:
                 "init_seed": INIT_SEED,
                 "init_mean": INIT_MEAN,
                 "init_var": INIT_VAR,
+            }
+        )
+    if INIT_MODE == "manual":
+        payload.update(
+            {
+                "init_seed": INIT_SEED,
+                "init_manual_noise_var": INIT_MANUAL_NOISE_VAR,
             }
         )
     torch.save(payload, INIT_WEIGHTS_PATH)
@@ -474,6 +493,7 @@ if __name__ == "__main__":
             "init_var": INIT_VAR,
             "init_mode": INIT_MODE,
             "init_w_manual": INIT_W_MANUAL,
+            "init_manual_noise_var": INIT_MANUAL_NOISE_VAR,
             "loaded_from": str(loaded_from),
             "save_epochs": SAVE_EPOCHS,
         },
