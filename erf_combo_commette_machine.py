@@ -17,8 +17,8 @@ SEED = 42
 INIT_SEED = 42
 
 N_TRAIN_TOTAL = 10_000
-N_TEST_TOTAL = 100
-N_TRAIN_USED = 10_000
+N_TEST_TOTAL = 10_000
+N_TRAIN_USED = 100
 N_TEST_USED = 100
 
 CACHE = Path(".cache").parent / "simple-committee-machine-erf-combo"
@@ -28,11 +28,13 @@ LOSS_LOGLOG_PLOT_PATH = CACHE / "loss_loglog.png"
 PRED_VS_THEORY_PLOT_PATH = CACHE / "pred_vs_theory.png"
 THEORY_CURVES_PLOT_PATH = CACHE / "theory_curves.png"
 INIT_THEORY_CURVES_PLOT_PATH = CACHE / "theory_curves_init.png"
+WEIGHT_DISTRIBUTION_PLOT_PATH = CACHE / "weights_distribution.png"
 CHECKPOINT_DIR = CACHE / "checkpoints"
 
 THEORY_GRID_POINTS = 500
 
 # 1-indexed epochs at which to save student weights; None = final checkpoint only
+SAVE_EPOCHS: list[int] | None = None
 # SAVE_EPOCHS: list[int] | None = [500]
 
 # None = start from saved init; "trained" = load TRAINED_WEIGHTS_PATH; or any .pt path
@@ -42,13 +44,14 @@ LOAD_FROM = CACHE / "student_init.pt"
 
 
 INIT_W = torch.tensor([[1.0], [-0.5], [-0.5]])
+# INIT_W = torch.tensor([[0.0], [0.0], [0.0]])
 
 
 class CommitteeStudent(nn.Module):
     def __init__(self, d, n_hidden):
         super().__init__()
-        # self.scale = 1.0 / math.sqrt(n_hidden)
-        self.scale = 1.0
+        self.scale = 1.0 / math.sqrt(n_hidden)
+        # self.scale = 1.0
         self.W = nn.Parameter(INIT_W.clone())
 
     def forward(self, x):
@@ -145,6 +148,164 @@ def save_theory_curves_plot(
 def student_hidden_weights(student: CommitteeStudent) -> torch.Tensor:
     """Scalar pre-activation weights w_p for each hidden unit (d=1)."""
     return student.W.detach().squeeze(-1)
+
+
+def weight_vector_stats(w: torch.Tensor) -> dict[str, float]:
+    return {
+        "mean": w.mean().item(),
+        "std": w.std().item(),
+        "min": w.min().item(),
+        "max": w.max().item(),
+    }
+
+
+def format_weight_vector_text(w: torch.Tensor, max_values: int = 12) -> str:
+    values = [f"{v:.6f}" for v in w.tolist()]
+    if len(values) <= max_values:
+        inner = ", ".join(values)
+    else:
+        half = max_values // 2
+        inner = ", ".join(values[:half]) + ", ..., " + ", ".join(values[-half:])
+    return f"[{inner}]"
+
+
+def save_weight_distribution_plot(
+    w_init: torch.Tensor,
+    w_trained: torch.Tensor,
+    path: Path,
+) -> Path:
+    w_init_np = w_init.numpy()
+    w_trained_np = w_trained.numpy()
+    w_min = min(w_init_np.min(), w_trained_np.min())
+    w_max = max(w_init_np.max(), w_trained_np.max())
+    if w_min == w_max:
+        w_min -= 0.5
+        w_max += 0.5
+
+    fig, axes = plt.subplots(2, 1, figsize=(8, 8))
+
+    ax = axes[0]
+    ax.hist(
+        w_init_np,
+        bins=20,
+        range=(w_min, w_max),
+        density=True,
+        alpha=0.6,
+        color="C0",
+        label="initial",
+    )
+    ax.hist(
+        w_trained_np,
+        bins=20,
+        range=(w_min, w_max),
+        density=True,
+        alpha=0.6,
+        color="C1",
+        label="trained",
+    )
+    ax.set_xlabel("w_p")
+    ax.set_ylabel("density")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    x = list(range(len(w_init_np)))
+    width = 0.35
+    ax.bar(
+        [i - width / 2 for i in x],
+        w_init_np,
+        width,
+        label="initial",
+        color="C0",
+    )
+    ax.bar(
+        [i + width / 2 for i in x],
+        w_trained_np,
+        width,
+        label="trained",
+        color="C1",
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"w_{i + 1}" for i in x])
+    ax.set_ylabel("w_p")
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+
+    vector_text = (
+        f"init:    {format_weight_vector_text(w_init)}\n"
+        f"trained: {format_weight_vector_text(w_trained)}"
+    )
+    fig.text(
+        0.5,
+        0.02,
+        vector_text,
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        family="monospace",
+    )
+
+    fig.tight_layout(rect=[0, 0.06, 1, 1])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def build_weight_wandb_log(
+    w_init: torch.Tensor,
+    w_trained: torch.Tensor | None = None,
+    plot_path: Path | None = None,
+) -> dict:
+    log: dict = {
+        "init_w_histogram": wandb.Histogram(w_init.numpy()),
+        **{f"init_w_p/{i}": w_init[i].item() for i in range(len(w_init))},
+        **{f"init_w_stats/{k}": v for k, v in weight_vector_stats(w_init).items()},
+    }
+    if w_trained is not None:
+        log.update(
+            {
+                "trained_w_histogram": wandb.Histogram(w_trained.numpy()),
+                **{
+                    f"trained_w_p/{i}": w_trained[i].item()
+                    for i in range(len(w_trained))
+                },
+                **{
+                    f"trained_w_stats/{k}": v
+                    for k, v in weight_vector_stats(w_trained).items()
+                },
+            }
+        )
+        log["weights_table"] = wandb.Table(
+            columns=["unit", "init", "trained", "delta"],
+            data=[
+                [
+                    i + 1,
+                    w_init[i].item(),
+                    w_trained[i].item(),
+                    (w_trained[i] - w_init[i]).item(),
+                ]
+                for i in range(len(w_init))
+            ],
+        )
+    if plot_path is not None:
+        log["weights_distribution"] = wandb.Image(str(plot_path))
+    return log
+
+
+def build_weight_wandb_summary(
+    w_init: torch.Tensor,
+    w_trained: torch.Tensor,
+) -> dict:
+    return {
+        "init_w_p": w_init.tolist(),
+        "trained_w_p": w_trained.tolist(),
+        **{f"init_w_stats_{k}": v for k, v in weight_vector_stats(w_init).items()},
+        **{
+            f"trained_w_stats_{k}": v
+            for k, v in weight_vector_stats(w_trained).items()
+        },
+    }
 
 
 def save_pred_vs_theory_plot(
@@ -303,6 +464,8 @@ if __name__ == "__main__":
     print(f"Saved initial theory curves to {init_curves_path}")
     print(f"  init_grid_mse={init_grid_mse:.6f}")
 
+    w_init = student_hidden_weights(student).clone()
+
     wandb.init(
         project="committee-student",
         name="erf_combo_d1",
@@ -324,7 +487,13 @@ if __name__ == "__main__":
     wandb.define_metric("test_loss", step_metric="epoch")
     wandb.define_metric("loss", step_metric="epoch")
     wandb.define_metric("grad_norm", step_metric="epoch")
-    wandb.log({"theory_curves_init": wandb.Image(str(init_curves_path))}, step=0)
+    wandb.log(
+        {
+            "theory_curves_init": wandb.Image(str(init_curves_path)),
+            **build_weight_wandb_log(w_init),
+        },
+        step=0,
+    )
     save_epochs = set(SAVE_EPOCHS or ())
     optimizer = optim.Adam(student.parameters(), lr=LR)
     loss_fn = nn.MSELoss()
@@ -376,9 +545,25 @@ if __name__ == "__main__":
     print(f"Saved trained weights to {TRAINED_WEIGHTS_PATH}")
 
     theory_metrics = analyze_convergence_to_theory(student, x_test)
-    wandb.run.summary.update({"init_grid_mse": init_grid_mse, **theory_metrics})
+
+    w_trained = student_hidden_weights(student)
+    weight_plot_path = save_weight_distribution_plot(
+        w_init, w_trained, WEIGHT_DISTRIBUTION_PLOT_PATH
+    )
+    print(f"Saved weight distribution plot to {weight_plot_path}")
+    print(f"  init w_p:    {w_init.tolist()}")
+    print(f"  trained w_p: {w_trained.tolist()}")
+
+    wandb.run.summary.update(
+        {
+            "init_grid_mse": init_grid_mse,
+            **theory_metrics,
+            **build_weight_wandb_summary(w_init, w_trained),
+        }
+    )
     wandb.log(
         {
+            **build_weight_wandb_log(w_init, w_trained, weight_plot_path),
             "pred_vs_theory": wandb.Image(str(PRED_VS_THEORY_PLOT_PATH)),
             "theory_curves": wandb.Image(str(THEORY_CURVES_PLOT_PATH)),
         }
