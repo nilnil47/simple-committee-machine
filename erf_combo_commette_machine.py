@@ -1,4 +1,4 @@
-"""Classic erf committee on teacher y = erf(x_1) - 2 erf(x_1/2). d=20, N=100, P=100 samples."""
+"""Classic erf committee on teacher y = erf(x_1) - 2 erf(x_1/2). d=10, N=256, P=100 samples."""
 
 import math
 from pathlib import Path
@@ -10,7 +10,7 @@ import torch.optim as optim
 import wandb
 
 DIMENSION = 10
-N = 16
+N = 256
 # N = 100
 
 W_STAR = torch.zeros(DIMENSION)
@@ -29,22 +29,29 @@ INIT_MEAN = 0.0
 INIT_VAR = 1.0 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
 
 # Init mode: "gaussian" or "manual"
-# INIT_MODE = "gaussian"
-INIT_MODE = "manual"
+INIT_MODE = "gaussian"
+# INIT_MODE = "manual"
 
 # Manual init: one entry per hidden unit (length N).
+# With scale 1/sqrt(N), sqrt(N) units at w=1 and 2*sqrt(N) at w=-1/2
+# reproduce y = erf(x_1) - 2 erf(x_1/2); remaining units start at 0.
 # d=1: each entry is a scalar w_p, e.g. [1.0, -0.5, -0.5, 0.0, ...]
 # d>1: each entry is a length-d list for that unit's weight row
+_N_SQRT = int(round(math.sqrt(N)))
+if _N_SQRT * _N_SQRT != N:
+    raise ValueError(f"Manual erf-combo init requires perfect-square N, got N={N}")
+_N_ONES = _N_SQRT
+_N_HALVES = 2 * _N_SQRT
+_N_ZEROS = N - _N_ONES - _N_HALVES
 INIT_W_MANUAL: list[float] | list[list[float]] | None = (
-    [[1.0] + [0.0] * (DIMENSION - 1)] * 4
-    + [[-0.5] + [0.0] * (DIMENSION - 1)] * 8
-    + [[0.0] * DIMENSION] * 4
+    [[1.0] + [0.0] * (DIMENSION - 1)] * _N_ONES
+    + [[-0.5] + [0.0] * (DIMENSION - 1)] * _N_HALVES
+    + [[0.0] * DIMENSION] * _N_ZEROS
 )
 # Gaussian noise on manual init: std = sqrt(INIT_MANUAL_NOISE_VAR); 0 for exact manual values
 INIT_MANUAL_NOISE_VAR = 0.2 / DIMENSION
 # INIT_MANUAL_NOISE_VAR = 0.00
 # INIT_MODE = "manual"
-# INIT_W_MANUAL = [1.0, -0.5, -0.5] + [0.0] * (N - 3)
 
 N_TRAIN_TOTAL = 10_000
 N_TEST_TOTAL = 5_000
