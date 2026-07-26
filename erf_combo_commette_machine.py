@@ -17,20 +17,27 @@ W_STAR = torch.zeros(DIMENSION)
 W_STAR[0] = 1.0
 
 LR = 1e-4
-EPOCHS = 10_000
+EPOCHS = 100_000
 
 # Optimizer: "adam" or "gd" (plain gradient descent, no momentum)
 OPTIMIZER = "adam"
 # OPTIMIZER = "gd"
-SEED = 42
-INIT_SEED = 42
+SEED = 43
+INIT_SEED = 43
+# Number of networks in the ensemble (seeds INIT_SEED .. INIT_SEED + ENSEMBLE_SIZE - 1).
+# Set to 1 for a single run. Ignored if ENSEMBLE_SEEDS is set explicitly.
+ENSEMBLE_SIZE = 1
+# Explicit seed list overrides ENSEMBLE_SIZE when not None, e.g. [0, 7, 42]
+ENSEMBLE_SEEDS: list[int] | None = None
+# None = auto group name from hyperparams
+WANDB_GROUP: str | None = None
 INIT_MEAN = 0.0
 # INIT_VAR = 0.1 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
 INIT_VAR = 1.0 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
 
 # Init mode: "gaussian" or "manual"
-INIT_MODE = "gaussian"
-# INIT_MODE = "manual"
+# INIT_MODE = "gaussian"
+INIT_MODE = "manual"
 
 # Manual init: one entry per hidden unit (length N).
 # With scale 1/sqrt(N), sqrt(N) units at w=1 and 2*sqrt(N) at w=-1/2
@@ -49,22 +56,20 @@ INIT_W_MANUAL: list[float] | list[list[float]] | None = (
     + [[0.0] * DIMENSION] * _N_ZEROS
 )
 # Gaussian noise on manual init: std = sqrt(INIT_MANUAL_NOISE_VAR); 0 for exact manual values
-INIT_MANUAL_NOISE_VAR = 0.2 / DIMENSION
+INIT_MANUAL_NOISE_VAR = 0.1 / DIMENSION
 # INIT_MANUAL_NOISE_VAR = 0.00
 # INIT_MODE = "manual"
 
-N_TRAIN_TOTAL = 10_000
+N_TRAIN_TOTAL = 100_000
 N_TEST_TOTAL = 5_000
 P = 100
 N_TEST_USED = 100
 
+# Grokking triage thresholds (logged in wandb config + used for summary)
+GROK_TRAIN_THRESH = 1e-3
+GROK_TEST_THRESH = 1e-2
+
 CACHE = Path(".cache").parent / "simple-committee-machine-erf-combo"
-INIT_WEIGHTS_PATH = CACHE / "student_init.pt"
-TRAINED_WEIGHTS_PATH = CACHE / "student_trained.pt"
-LOSS_LOGLOG_PLOT_PATH = CACHE / "loss_loglog.png"
-PRED_VS_THEORY_PLOT_PATH = CACHE / "pred_vs_theory.png"
-THEORY_CURVES_PLOT_PATH = CACHE / "theory_curves.png"
-WEIGHT_DISTRIBUTION_PLOT_PATH = CACHE / "weights_distribution.png"
 CHECKPOINT_DIR = CACHE / "checkpoints"
 
 WEIGHT_DIST_BINS = 30
@@ -75,18 +80,50 @@ THEORY_GRID_POINTS = 500
 SAVE_EPOCHS: list[int] | None = None
 # SAVE_EPOCHS: list[int] | None = [500]
 
-# None = start from saved init; "trained" = load TRAINED_WEIGHTS_PATH; or any .pt path
-LOAD_FROM = CACHE / "student_init.pt"
-# LOAD_FROM = TRAINED_WEIGHTS_PATH
-# LOAD_FROM = None
+# Single-seed only: None = per-seed init cache; "trained" = that seed's trained weights; or any .pt path.
+# Ignored when training more than one ensemble seed.
+LOAD_FROM: str | Path | None = None
+# LOAD_FROM = "trained"
 
 
-def sample_init_W(n: int, d: int) -> torch.Tensor:
-    g = torch.Generator().manual_seed(INIT_SEED)
+def resolve_ensemble_seeds() -> list[int]:
+    if ENSEMBLE_SEEDS is not None:
+        return list(ENSEMBLE_SEEDS)
+    if ENSEMBLE_SIZE < 1:
+        raise ValueError(f"ENSEMBLE_SIZE must be >= 1, got {ENSEMBLE_SIZE}")
+    return list(range(INIT_SEED, INIT_SEED + ENSEMBLE_SIZE))
+
+
+def resolve_wandb_group() -> str:
+    if WANDB_GROUP is not None:
+        return WANDB_GROUP
+    if INIT_MODE == "manual":
+        return f"erf_combo_{INIT_MODE}_P{P}_noise{INIT_MANUAL_NOISE_VAR}"
+    return f"erf_combo_{INIT_MODE}_P{P}_var{INIT_VAR}"
+
+
+def init_weights_path(seed: int) -> Path:
+    return CACHE / f"student_init_seed{seed}.pt"
+
+
+def trained_weights_path(seed: int) -> Path:
+    return CACHE / f"student_trained_seed{seed}.pt"
+
+
+def seed_plot_dir(seed: int) -> Path:
+    return CACHE / "plots" / f"seed{seed}"
+
+
+def seed_checkpoint_dir(seed: int) -> Path:
+    return CHECKPOINT_DIR / f"seed{seed}"
+
+
+def sample_init_W(n: int, d: int, init_seed: int = INIT_SEED) -> torch.Tensor:
+    g = torch.Generator().manual_seed(init_seed)
     return INIT_MEAN + math.sqrt(INIT_VAR) * torch.randn(n, d, generator=g)
 
 
-def manual_init_W(n: int, d: int) -> torch.Tensor:
+def manual_init_W(n: int, d: int, init_seed: int = INIT_SEED) -> torch.Tensor:
     if INIT_W_MANUAL is None:
         raise ValueError("INIT_MODE='manual' requires INIT_W_MANUAL")
     if len(INIT_W_MANUAL) != n:
@@ -109,24 +146,24 @@ def manual_init_W(n: int, d: int) -> torch.Tensor:
             rows.append([float(v) for v in row])
         W = torch.tensor(rows, dtype=torch.float32)
     if INIT_MANUAL_NOISE_VAR > 0:
-        g = torch.Generator().manual_seed(INIT_SEED)
+        g = torch.Generator().manual_seed(init_seed)
         W = W + math.sqrt(INIT_MANUAL_NOISE_VAR) * torch.randn(n, d, generator=g)
     return W
 
 
-def make_init_W(n: int, d: int) -> torch.Tensor:
+def make_init_W(n: int, d: int, init_seed: int = INIT_SEED) -> torch.Tensor:
     if INIT_MODE == "gaussian":
-        return sample_init_W(n, d)
+        return sample_init_W(n, d, init_seed)
     if INIT_MODE == "manual":
-        return manual_init_W(n, d)
+        return manual_init_W(n, d, init_seed)
     raise ValueError(f"Unknown INIT_MODE: {INIT_MODE!r}")
 
 
 class CommitteeStudent(nn.Module):
-    def __init__(self, d, n):
+    def __init__(self, d, n, init_seed: int = INIT_SEED):
         super().__init__()
         self.scale = 1.0 / math.sqrt(n)
-        self.W = nn.Parameter(make_init_W(n, d))
+        self.W = nn.Parameter(make_init_W(n, d, init_seed))
 
     def forward(self, x):
         return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
@@ -297,6 +334,8 @@ def analyze_convergence_to_theory(
     student: CommitteeStudent,
     x_test: torch.Tensor,
     y_student_init: torch.Tensor,
+    theory_curves_path: Path,
+    pred_vs_theory_path: Path,
 ) -> dict[str, float]:
     """Compare trained student to the erf-combo teacher."""
     student.eval()
@@ -315,9 +354,9 @@ def analyze_convergence_to_theory(
         y_teacher_grid,
         y_student_init,
         y_student_grid,
-        THEORY_CURVES_PLOT_PATH,
+        theory_curves_path,
     )
-    scatter_path = save_pred_vs_theory_plot(y_test, y_student, PRED_VS_THEORY_PLOT_PATH)
+    scatter_path = save_pred_vs_theory_plot(y_test, y_student, pred_vs_theory_path)
 
     w_trained = project_onto_w_star(student_hidden_weights(student))
     print("Teacher comparison:")
@@ -339,6 +378,38 @@ def analyze_convergence_to_theory(
     }
 
 
+def compute_grok_summaries(
+    train_losses: list[float],
+    test_losses: list[float],
+) -> dict[str, float | int | bool]:
+    """Summary fields for sorting/filtering grokking across many seeds in W&B."""
+    if not train_losses or not test_losses:
+        raise ValueError("loss histories must be non-empty")
+    min_test_loss = min(test_losses)
+    min_test_loss_epoch = test_losses.index(min_test_loss) + 1
+    train_fit_epoch = -1
+    grok_epoch = -1
+    for i, (train_loss, test_loss) in enumerate(zip(train_losses, test_losses)):
+        epoch_num = i + 1
+        if train_fit_epoch < 0 and train_loss < GROK_TRAIN_THRESH:
+            train_fit_epoch = epoch_num
+        if (
+            grok_epoch < 0
+            and train_loss < GROK_TRAIN_THRESH
+            and test_loss < GROK_TEST_THRESH
+        ):
+            grok_epoch = epoch_num
+    return {
+        "final_train_loss": train_losses[-1],
+        "final_test_loss": test_losses[-1],
+        "min_test_loss": min_test_loss,
+        "min_test_loss_epoch": min_test_loss_epoch,
+        "train_fit_epoch": train_fit_epoch,
+        "grok_epoch": grok_epoch,
+        "grokked": grok_epoch >= 0,
+    }
+
+
 def _cached_data_valid(path: Path, min_rows: int) -> bool:
     if not path.exists():
         return False
@@ -352,34 +423,35 @@ def data_cache_valid() -> bool:
     )
 
 
-def _init_cache_matches(state: dict) -> bool:
+def _init_cache_matches(state: dict, init_seed: int) -> bool:
     if state["W"].shape != (N, DIMENSION):
         return False
     if state.get("init_mode") != INIT_MODE:
         return False
     if INIT_MODE == "gaussian":
         return (
-            state.get("init_seed") == INIT_SEED
+            state.get("init_seed") == init_seed
             and state.get("init_mean") == INIT_MEAN
             and state.get("init_var") == INIT_VAR
         )
     if INIT_MODE == "manual":
         return (
-            state.get("init_seed") == INIT_SEED
+            state.get("init_seed") == init_seed
             and state.get("init_manual_noise_var") == INIT_MANUAL_NOISE_VAR
-            and torch.allclose(state["W"], make_init_W(N, DIMENSION))
+            and torch.allclose(state["W"], make_init_W(N, DIMENSION, init_seed))
         )
     return False
 
 
-def ensure_init_weights() -> None:
-    """Cache init weights for all runs (Gaussian or manual)."""
-    if INIT_WEIGHTS_PATH.exists():
-        state = torch.load(INIT_WEIGHTS_PATH, weights_only=True)
-        if _init_cache_matches(state):
-            return
-        print("Regenerating init weights (cached init mismatch)")
-    student = CommitteeStudent(DIMENSION, N)
+def ensure_init_weights(init_seed: int) -> Path:
+    """Cache init weights for this seed (Gaussian or manual)."""
+    path = init_weights_path(init_seed)
+    if path.exists():
+        state = torch.load(path, weights_only=True)
+        if _init_cache_matches(state, init_seed):
+            return path
+        print(f"Regenerating init weights for seed {init_seed} (cached init mismatch)")
+    student = CommitteeStudent(DIMENSION, N, init_seed)
     payload: dict = {
         "W": student.W.detach().clone(),
         "init_mode": INIT_MODE,
@@ -387,7 +459,7 @@ def ensure_init_weights() -> None:
     if INIT_MODE == "gaussian":
         payload.update(
             {
-                "init_seed": INIT_SEED,
+                "init_seed": init_seed,
                 "init_mean": INIT_MEAN,
                 "init_var": INIT_VAR,
             }
@@ -395,12 +467,14 @@ def ensure_init_weights() -> None:
     if INIT_MODE == "manual":
         payload.update(
             {
-                "init_seed": INIT_SEED,
+                "init_seed": init_seed,
                 "init_manual_noise_var": INIT_MANUAL_NOISE_VAR,
             }
         )
-    torch.save(payload, INIT_WEIGHTS_PATH)
-    print(f"Saved init weights to {INIT_WEIGHTS_PATH}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, path)
+    print(f"Saved init weights to {path}")
+    return path
 
 
 def make_optimizer(
@@ -413,18 +487,22 @@ def make_optimizer(
     raise ValueError(f"Unknown OPTIMIZER: {optimizer!r} (use 'adam' or 'gd')")
 
 
-def resolve_checkpoint(load_from: str | Path | None) -> Path:
+def resolve_checkpoint(
+    load_from: str | Path | None, init_seed: int
+) -> Path:
     if load_from is None:
-        return INIT_WEIGHTS_PATH
+        return ensure_init_weights(init_seed)
     if load_from == "trained":
-        return TRAINED_WEIGHTS_PATH
+        return trained_weights_path(init_seed)
     return Path(load_from)
 
 
-def load_student(load_from: str | Path | None) -> tuple[CommitteeStudent, Path]:
-    ensure_init_weights()
-    student = CommitteeStudent(DIMENSION, N)
-    path = resolve_checkpoint(load_from)
+def load_student(
+    init_seed: int, load_from: str | Path | None
+) -> tuple[CommitteeStudent, Path]:
+    ensure_init_weights(init_seed)
+    student = CommitteeStudent(DIMENSION, N, init_seed)
+    path = resolve_checkpoint(load_from, init_seed)
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
     state = torch.load(path, weights_only=True)
@@ -436,55 +514,56 @@ def load_student(load_from: str | Path | None) -> tuple[CommitteeStudent, Path]:
     return student, path
 
 
-def checkpoint_path(epoch: int) -> Path:
+def checkpoint_path(seed: int, epoch: int) -> Path:
     """Path for a 1-indexed training epoch checkpoint."""
-    return CHECKPOINT_DIR / f"student_epoch_{epoch:06d}.pt"
+    return seed_checkpoint_dir(seed) / f"student_epoch_{epoch:06d}.pt"
 
 
 def save_student_checkpoint(
-    student: CommitteeStudent, epoch: int, path: Path | None = None
+    student: CommitteeStudent, seed: int, epoch: int, path: Path | None = None
 ) -> Path:
     """Save student weights at the given 1-indexed epoch."""
-    path = path or checkpoint_path(epoch)
+    path = path or checkpoint_path(seed, epoch)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(student.state_dict(), path)
     print(f"Saved checkpoint at epoch {epoch} to {path}")
     return path
 
 
-if __name__ == "__main__":
-    CACHE.mkdir(parents=True, exist_ok=True)
-    if data_cache_valid():
-        x_train = torch.load(CACHE / "x_train.pt", weights_only=True)
-        x_test = torch.load(CACHE / "x_test.pt", weights_only=True)
-    else:
-        print("Regenerating data cache (missing or dimension mismatch)")
-        g = torch.Generator().manual_seed(SEED)
-        x_train = torch.randn(N_TRAIN_TOTAL, DIMENSION, generator=g)
-        x_test = torch.randn(N_TEST_TOTAL, DIMENSION, generator=g)
-        torch.save(x_train, CACHE / "x_train.pt")
-        torch.save(x_test, CACHE / "x_test.pt")
+def train_one_seed(
+    seed: int,
+    x_train: torch.Tensor,
+    y_train: torch.Tensor,
+    x_test: torch.Tensor,
+    y_test: torch.Tensor,
+    *,
+    group: str,
+    ensemble_size: int,
+    load_from: str | Path | None,
+) -> None:
+    plot_dir = seed_plot_dir(seed)
+    loss_loglog_path = plot_dir / "loss_loglog.png"
+    pred_vs_theory_path = plot_dir / "pred_vs_theory.png"
+    theory_curves_path = plot_dir / "theory_curves.png"
+    weight_dist_path = plot_dir / "weights_distribution.png"
+    trained_path = trained_weights_path(seed)
 
-    x_train = x_train[:P]
-    x_test = x_test[:N_TEST_USED]
-    y_train = teacher_erf_combo(x_train)
-    y_test = teacher_erf_combo(x_test)
-
-    student, loaded_from = load_student(LOAD_FROM)
+    student, loaded_from = load_student(seed, load_from)
 
     student.eval()
     with torch.no_grad():
         x_grid = make_theory_grid()
-        y_teacher_grid = teacher_erf_combo(x_grid)
         y_student_init = student(x_grid)
         init_grid_mse = mse_vs_teacher(y_student_init, x_grid)
-    print(f"init_grid_mse={init_grid_mse:.6f}")
+    print(f"[seed {seed}] init_grid_mse={init_grid_mse:.6f}")
 
     w_init = student_hidden_weights(student).clone()
 
     wandb.init(
         project="committee-student",
-        name="erf_combo_d20",
+        group=group,
+        job_type="seed",
+        name=f"seed_{seed}",
         config={
             "task": "erf_combo",
             "dimension": DIMENSION,
@@ -495,7 +574,9 @@ if __name__ == "__main__":
             "optimizer": OPTIMIZER,
             "epochs": EPOCHS,
             "n_test_used": N_TEST_USED,
-            "init_seed": INIT_SEED,
+            "init_seed": seed,
+            "ensemble_size": ensemble_size,
+            "ensemble_group": group,
             "init_mean": INIT_MEAN,
             "init_var": INIT_VAR,
             "init_mode": INIT_MODE,
@@ -503,7 +584,10 @@ if __name__ == "__main__":
             "init_manual_noise_var": INIT_MANUAL_NOISE_VAR,
             "loaded_from": str(loaded_from),
             "save_epochs": SAVE_EPOCHS,
+            "grok_train_thresh": GROK_TRAIN_THRESH,
+            "grok_test_thresh": GROK_TEST_THRESH,
         },
+        reinit=True,
     )
     wandb.define_metric("epoch")
     wandb.define_metric("test_loss", step_metric="epoch")
@@ -542,29 +626,36 @@ if __name__ == "__main__":
         epoch_num = epoch + 1
 
         if epoch_num in save_epochs:
-            save_student_checkpoint(student, epoch_num)
+            save_student_checkpoint(student, seed, epoch_num)
 
         if epoch_num % 1000 == 0:
-            print(f"epoch {epoch_num}: train={loss.item():.4f} test={test_loss:.4f}")
+            print(
+                f"[seed {seed}] epoch {epoch_num}: "
+                f"train={loss.item():.4f} test={test_loss:.4f}"
+            )
 
     plot_path = save_loss_loglog_plot(
         epochs_hist,
         train_loss_hist,
         test_loss_hist,
-        LOSS_LOGLOG_PLOT_PATH,
+        loss_loglog_path,
     )
-    print(f"Saved log-log loss plot to {plot_path}")
+    print(f"[seed {seed}] Saved log-log loss plot to {plot_path}")
 
-    torch.save(student.state_dict(), TRAINED_WEIGHTS_PATH)
-    print(f"Saved trained weights to {TRAINED_WEIGHTS_PATH}")
+    torch.save(student.state_dict(), trained_path)
+    print(f"[seed {seed}] Saved trained weights to {trained_path}")
 
-    theory_metrics = analyze_convergence_to_theory(student, x_test, y_student_init)
+    theory_metrics = analyze_convergence_to_theory(
+        student,
+        x_test,
+        y_student_init,
+        theory_curves_path,
+        pred_vs_theory_path,
+    )
 
     w_trained = student_hidden_weights(student)
-    weight_plot_path = save_weight_distribution_plot(
-        w_init, w_trained, WEIGHT_DISTRIBUTION_PLOT_PATH
-    )
-    print(f"Saved weight distribution plot to {weight_plot_path}")
+    weight_plot_path = save_weight_distribution_plot(w_init, w_trained, weight_dist_path)
+    print(f"[seed {seed}] Saved weight distribution plot to {weight_plot_path}")
     w_init_proj = project_onto_w_star(w_init)
     w_trained_proj = project_onto_w_star(w_trained)
     print(
@@ -576,12 +667,67 @@ if __name__ == "__main__":
         f"std={w_trained_proj.std().item():.4f}"
     )
 
-    wandb.run.summary.update({"init_grid_mse": init_grid_mse, **theory_metrics})
+    grok_metrics = compute_grok_summaries(train_loss_hist, test_loss_hist)
+    print(
+        f"[seed {seed}] grokked={grok_metrics['grokked']} "
+        f"grok_epoch={grok_metrics['grok_epoch']} "
+        f"train_fit_epoch={grok_metrics['train_fit_epoch']} "
+        f"final_test_loss={grok_metrics['final_test_loss']:.6f}"
+    )
+
+    wandb.run.summary.update(
+        {
+            "init_grid_mse": init_grid_mse,
+            **theory_metrics,
+            **grok_metrics,
+        }
+    )
     wandb.log(
         {
+            "loss_loglog": wandb.Image(str(plot_path)),
             "weights_distribution": wandb.Image(str(weight_plot_path)),
-            "pred_vs_theory": wandb.Image(str(PRED_VS_THEORY_PLOT_PATH)),
-            "theory_curves": wandb.Image(str(THEORY_CURVES_PLOT_PATH)),
+            "pred_vs_theory": wandb.Image(str(pred_vs_theory_path)),
+            "theory_curves": wandb.Image(str(theory_curves_path)),
         }
     )
     wandb.finish()
+
+
+if __name__ == "__main__":
+    CACHE.mkdir(parents=True, exist_ok=True)
+    if data_cache_valid():
+        x_train = torch.load(CACHE / "x_train.pt", weights_only=True)
+        x_test = torch.load(CACHE / "x_test.pt", weights_only=True)
+    else:
+        print("Regenerating data cache (missing or dimension mismatch)")
+        g = torch.Generator().manual_seed(SEED)
+        x_train = torch.randn(N_TRAIN_TOTAL, DIMENSION, generator=g)
+        x_test = torch.randn(N_TEST_TOTAL, DIMENSION, generator=g)
+        torch.save(x_train, CACHE / "x_train.pt")
+        torch.save(x_test, CACHE / "x_test.pt")
+
+    x_train = x_train[:P]
+    x_test = x_test[:N_TEST_USED]
+    y_train = teacher_erf_combo(x_train)
+    y_test = teacher_erf_combo(x_test)
+
+    seeds = resolve_ensemble_seeds()
+    group = resolve_wandb_group()
+    # Multi-seed: always start from per-seed init so LOAD_FROM cannot collapse seeds.
+    load_from = LOAD_FROM if len(seeds) == 1 else None
+    print(
+        f"Ensemble: {len(seeds)} seed(s), group={group!r}, "
+        f"load_from={load_from!r}"
+    )
+
+    for seed in seeds:
+        train_one_seed(
+            seed,
+            x_train,
+            y_train,
+            x_test,
+            y_test,
+            group=group,
+            ensemble_size=len(seeds),
+            load_from=load_from,
+        )
