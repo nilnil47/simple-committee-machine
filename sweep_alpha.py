@@ -23,7 +23,7 @@ from erf_combo_commette_machine import (
 ALPHA_START = 0.05
 ALPHA_STOP = 1.0
 ALPHA_STEP = 0.01
-MAX_WORKERS: int | None = None
+MAX_WORKERS: int | None = 20
 LOG_EVERY = 100
 WANDB_GROUP = "alpha_sweep"
 USE_WANDB = True

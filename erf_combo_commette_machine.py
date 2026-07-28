@@ -28,7 +28,7 @@ from committee_network import (
 )
 
 LR = 5e-4
-EPOCHS = 50_000
+EPOCHS = 20_000
 
 # Optimizer: "adam" or "gd" (plain gradient descent, no momentum)
 OPTIMIZER = "adam"
