@@ -17,8 +17,7 @@ import torch.nn as nn
 import torch.optim as optim
 import wandb
 
-from erf_combo_commette_machine import (
-    CACHE,
+from committee_network import (
     DIMENSION,
     INIT_MANUAL_NOISE_VAR,
     INIT_MEAN,
@@ -26,16 +25,19 @@ from erf_combo_commette_machine import (
     INIT_SEED,
     INIT_VAR,
     INIT_W_MANUAL,
-    LR,
     N,
+    CommitteeStudent,
+    teacher_erf_combo,
+)
+from erf_combo_commette_machine import (
+    CACHE,
+    LR,
     N_TEST_TOTAL,
     N_TEST_USED,
     N_TRAIN_TOTAL,
     OPTIMIZER,
     P,
     SEED,
-    TRAINED_WEIGHTS_PATH,
-    CommitteeStudent,
     data_cache_valid,
     load_student,
     make_optimizer,
@@ -47,7 +49,7 @@ from erf_combo_commette_machine import (
     save_theory_stages_plot,
     save_weight_distribution_plot,
     student_hidden_weights,
-    teacher_erf_combo,
+    trained_weights_path,
 )
 
 # key -> (hidden unit index 0..N-1, target weight vector length d)
@@ -70,7 +72,7 @@ WEIGHT_PRESETS: dict[str, tuple[int, list[float]]] = {
     "f": (15, [0.0] * DIMENSION),
 }
 
-CHECKPOINT = TRAINED_WEIGHTS_PATH
+CHECKPOINT = trained_weights_path(INIT_SEED)
 EPOCHS_PER_UI_TICK = 10
 # None = train until q; set e.g. 10_000 for a fixed cap
 MAX_EPOCHS: int | None = None
@@ -79,6 +81,8 @@ UI_REFRESH_MS = 100
 
 WANDB_PROJECT = "committee-student"
 WANDB_RUN_NAME = "erf_combo_interactive"
+# False = no W&B upload (wandb runs in disabled mode)
+USE_WANDB = True
 
 INTERACTIVE_PLOT_DIR = CACHE / "interactive"
 LOSS_LOGLOG_PLOT_PATH = INTERACTIVE_PLOT_DIR / "loss_loglog.png"
@@ -476,6 +480,7 @@ def init_wandb(loaded_from: Path) -> None:
     wandb.init(
         project=WANDB_PROJECT,
         name=WANDB_RUN_NAME,
+        mode="online" if USE_WANDB else "disabled",
         config={
             "task": "erf_combo_interactive",
             "mode": "interactive",

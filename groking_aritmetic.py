@@ -7,8 +7,6 @@ import torch.nn as nn
 import torch.optim as optim
 import wandb
 
-from prepare import _ensure_wandb_auth
-
 GRAD_NORM_PLOT_PATH = Path("groking_grad_norm.png")
 
 # 1. Define a minimalist 2-Layer MLP Architecture
@@ -74,7 +72,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = GrokkingMLP(p=p).to(device)
 
 # Strong weight decay accelerates the contraction out of the memorization basin
-optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1.0)
+optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0)
 criterion = nn.CrossEntropyLoss()
 
 # 4. Optimization Loop
@@ -82,7 +80,6 @@ epochs = 6000
 log_frequency = 100
 train_split = 0.4
 
-_ensure_wandb_auth()
 wandb.init(
     project=os.environ.get("WANDB_PROJECT", "grokking-arithmetic"),
     config={

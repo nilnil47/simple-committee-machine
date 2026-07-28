@@ -1,6 +1,9 @@
-"""Classic erf committee on teacher y = erf(x_1) - 2 erf(x_1/2). d=10, N=256, P=100 samples."""
+"""Training harness for the erf committee on teacher y = erf(x_1) - 2 erf(x_1/2).
 
-import math
+Architecture lives in committee_network.py (CommitteeStudent + teacher + init).
+"""
+
+from logging import FATAL
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -9,21 +12,28 @@ import torch.nn as nn
 import torch.optim as optim
 import wandb
 
-DIMENSION = 10
-N = 256
-# N = 100
+from committee_network import (
+    DIMENSION,
+    INIT_MANUAL_NOISE_VAR,
+    INIT_MEAN,
+    INIT_MODE,
+    INIT_SEED,
+    INIT_VAR,
+    INIT_W_MANUAL,
+    N,
+    W_STAR,
+    CommitteeStudent,
+    make_init_W,
+    teacher_erf_combo,
+)
 
-W_STAR = torch.zeros(DIMENSION)
-W_STAR[0] = 1.0
-
-LR = 1e-4
-EPOCHS = 100_000
+LR = 5e-4
+EPOCHS = 50_000
 
 # Optimizer: "adam" or "gd" (plain gradient descent, no momentum)
 OPTIMIZER = "adam"
 # OPTIMIZER = "gd"
 SEED = 43
-INIT_SEED = 43
 # Number of networks in the ensemble (seeds INIT_SEED .. INIT_SEED + ENSEMBLE_SIZE - 1).
 # Set to 1 for a single run. Ignored if ENSEMBLE_SEEDS is set explicitly.
 ENSEMBLE_SIZE = 1
@@ -31,39 +41,23 @@ ENSEMBLE_SIZE = 1
 ENSEMBLE_SEEDS: list[int] | None = None
 # None = auto group name from hyperparams
 WANDB_GROUP: str | None = None
-INIT_MEAN = 0.0
-# INIT_VAR = 0.1 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
-INIT_VAR = 1.0 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
+# False = no W&B upload (wandb runs in disabled mode)
+USE_WANDB = True
+# USE_WANDB = False
 
-# Init mode: "gaussian" or "manual"
-# INIT_MODE = "gaussian"
-INIT_MODE = "manual"
-
-# Manual init: one entry per hidden unit (length N).
-# With scale 1/sqrt(N), sqrt(N) units at w=1 and 2*sqrt(N) at w=-1/2
-# reproduce y = erf(x_1) - 2 erf(x_1/2); remaining units start at 0.
-# d=1: each entry is a scalar w_p, e.g. [1.0, -0.5, -0.5, 0.0, ...]
-# d>1: each entry is a length-d list for that unit's weight row
-_N_SQRT = int(round(math.sqrt(N)))
-if _N_SQRT * _N_SQRT != N:
-    raise ValueError(f"Manual erf-combo init requires perfect-square N, got N={N}")
-_N_ONES = _N_SQRT
-_N_HALVES = 2 * _N_SQRT
-_N_ZEROS = N - _N_ONES - _N_HALVES
-INIT_W_MANUAL: list[float] | list[list[float]] | None = (
-    [[1.0] + [0.0] * (DIMENSION - 1)] * _N_ONES
-    + [[-0.5] + [0.0] * (DIMENSION - 1)] * _N_HALVES
-    + [[0.0] * DIMENSION] * _N_ZEROS
-)
-# Gaussian noise on manual init: std = sqrt(INIT_MANUAL_NOISE_VAR); 0 for exact manual values
-INIT_MANUAL_NOISE_VAR = 0.1 / DIMENSION
-# INIT_MANUAL_NOISE_VAR = 0.00
-# INIT_MODE = "manual"
-
+ALPHA = 0.2
 N_TRAIN_TOTAL = 100_000
 N_TEST_TOTAL = 5_000
-P = 100
-N_TEST_USED = 100
+# Sample counts must be ints (ALPHA may be rational, e.g. 0.1 or 1/2)
+P = max(1, round(DIMENSION * N * ALPHA))
+N_TEST_USED = max(1, round(DIMENSION * N * ALPHA))
+if P > N_TRAIN_TOTAL:
+    raise ValueError(f"P={P} exceeds N_TRAIN_TOTAL={N_TRAIN_TOTAL} (ALPHA={ALPHA})")
+if N_TEST_USED > N_TEST_TOTAL:
+    raise ValueError(
+        f"N_TEST_USED={N_TEST_USED} exceeds N_TEST_TOTAL={N_TEST_TOTAL} (ALPHA={ALPHA})"
+    )
+
 
 # Grokking triage thresholds (logged in wandb config + used for summary)
 GROK_TRAIN_THRESH = 1e-3
@@ -116,67 +110,6 @@ def seed_plot_dir(seed: int) -> Path:
 
 def seed_checkpoint_dir(seed: int) -> Path:
     return CHECKPOINT_DIR / f"seed{seed}"
-
-
-def sample_init_W(n: int, d: int, init_seed: int = INIT_SEED) -> torch.Tensor:
-    g = torch.Generator().manual_seed(init_seed)
-    return INIT_MEAN + math.sqrt(INIT_VAR) * torch.randn(n, d, generator=g)
-
-
-def manual_init_W(n: int, d: int, init_seed: int = INIT_SEED) -> torch.Tensor:
-    if INIT_W_MANUAL is None:
-        raise ValueError("INIT_MODE='manual' requires INIT_W_MANUAL")
-    if len(INIT_W_MANUAL) != n:
-        raise ValueError(
-            f"INIT_W_MANUAL must have length N={n}, got {len(INIT_W_MANUAL)}"
-        )
-    if d == 1:
-        W = torch.tensor(INIT_W_MANUAL, dtype=torch.float32).reshape(n, d)
-    else:
-        rows: list[list[float]] = []
-        for i, row in enumerate(INIT_W_MANUAL):
-            if isinstance(row, (int, float)):
-                raise ValueError(
-                    f"INIT_W_MANUAL[{i}] must be a length-{d} list when DIMENSION > 1"
-                )
-            if len(row) != d:
-                raise ValueError(
-                    f"INIT_W_MANUAL[{i}] must have length d={d}, got {len(row)}"
-                )
-            rows.append([float(v) for v in row])
-        W = torch.tensor(rows, dtype=torch.float32)
-    if INIT_MANUAL_NOISE_VAR > 0:
-        g = torch.Generator().manual_seed(init_seed)
-        W = W + math.sqrt(INIT_MANUAL_NOISE_VAR) * torch.randn(n, d, generator=g)
-    return W
-
-
-def make_init_W(n: int, d: int, init_seed: int = INIT_SEED) -> torch.Tensor:
-    if INIT_MODE == "gaussian":
-        return sample_init_W(n, d, init_seed)
-    if INIT_MODE == "manual":
-        return manual_init_W(n, d, init_seed)
-    raise ValueError(f"Unknown INIT_MODE: {INIT_MODE!r}")
-
-
-class CommitteeStudent(nn.Module):
-    def __init__(self, d, n, init_seed: int = INIT_SEED):
-        super().__init__()
-        self.scale = 1.0 / math.sqrt(n)
-        self.W = nn.Parameter(make_init_W(n, d, init_seed))
-
-    def forward(self, x):
-        return self.scale * torch.erf(x @ self.W.T).sum(dim=-1)
-
-
-def teacher_erf_combo(x: torch.Tensor) -> torch.Tensor:
-    """Theoretical target y(x) = erf(x_1) - 2 erf(x_1/2).
-
-    This is the supervisor's teacher. It has no linear term at the origin:
-    y'(0) = 0, and the Taylor expansion starts at O(x^3).
-    """
-    x1 = x[:, 0]
-    return torch.erf(x1) - 2.0 * torch.erf(0.5 * x1)
 
 
 def mse_vs_teacher(pred: torch.Tensor, x: torch.Tensor) -> float:
@@ -564,6 +497,7 @@ def train_one_seed(
         group=group,
         job_type="seed",
         name=f"seed_{seed}",
+        mode="online" if USE_WANDB else "disabled",
         config={
             "task": "erf_combo",
             "dimension": DIMENSION,
