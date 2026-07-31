@@ -69,6 +69,29 @@ def alpha_tag(alpha: float) -> str:
     return f"alpha{alpha:.2f}"
 
 
+def c_tag(c: float) -> str:
+    return f"c{c:.2f}"
+
+
+def apply_manual_noise_c(c: float) -> float:
+    """Set INIT_MANUAL_NOISE_VAR = C / DIMENSION in committee_network and this module."""
+    import committee_network as cn
+
+    noise_var = c / DIMENSION
+    cn.INIT_MANUAL_NOISE_VAR = noise_var
+    global INIT_MANUAL_NOISE_VAR
+    INIT_MANUAL_NOISE_VAR = noise_var
+    return noise_var
+
+
+def _sweep_subdir(alpha: float | None = None, c: float | None = None) -> Path | None:
+    if alpha is not None:
+        return CACHE / alpha_tag(alpha)
+    if c is not None:
+        return CACHE / c_tag(c)
+    return None
+
+
 # Sample counts must be ints (ALPHA may be rational, e.g. 0.1 or 1/2)
 P, N_TEST_USED = compute_sample_counts(ALPHA)
 
@@ -79,6 +102,14 @@ GROK_TEST_THRESH = 1e-2
 
 CACHE = Path(".cache").parent / "simple-committee-machine-erf-combo"
 CHECKPOINT_DIR = CACHE / "checkpoints"
+
+
+def load_local_checkpoint(path: Path):
+    """Load a trusted local .pt file written by this project."""
+    try:
+        return torch.load(path, weights_only=True)
+    except Exception:
+        return torch.load(path, weights_only=False)
 
 WEIGHT_DIST_BINS = 30
 
@@ -111,26 +142,38 @@ def resolve_wandb_group(alpha: float | None = None, p: int | None = None) -> str
     return f"erf_combo_{INIT_MODE}_P{p_used}_var{INIT_VAR}"
 
 
-def init_weights_path(seed: int) -> Path:
-    return CACHE / f"student_init_seed{seed}.pt"
+def init_weights_path(seed: int, c: float | None = None) -> Path:
+    sweep = _sweep_subdir(c=c)
+    if sweep is None:
+        return CACHE / f"student_init_seed{seed}.pt"
+    return sweep / f"student_init_seed{seed}.pt"
 
 
-def trained_weights_path(seed: int, alpha: float | None = None) -> Path:
-    if alpha is None:
+def trained_weights_path(
+    seed: int, alpha: float | None = None, c: float | None = None
+) -> Path:
+    sweep = _sweep_subdir(alpha=alpha, c=c)
+    if sweep is None:
         return CACHE / f"student_trained_seed{seed}.pt"
-    return CACHE / alpha_tag(alpha) / f"student_trained_seed{seed}.pt"
+    return sweep / f"student_trained_seed{seed}.pt"
 
 
-def seed_plot_dir(seed: int, alpha: float | None = None) -> Path:
-    if alpha is None:
+def seed_plot_dir(
+    seed: int, alpha: float | None = None, c: float | None = None
+) -> Path:
+    sweep = _sweep_subdir(alpha=alpha, c=c)
+    if sweep is None:
         return CACHE / "plots" / f"seed{seed}"
-    return CACHE / alpha_tag(alpha) / "plots" / f"seed{seed}"
+    return sweep / "plots" / f"seed{seed}"
 
 
-def seed_checkpoint_dir(seed: int, alpha: float | None = None) -> Path:
-    if alpha is None:
+def seed_checkpoint_dir(
+    seed: int, alpha: float | None = None, c: float | None = None
+) -> Path:
+    sweep = _sweep_subdir(alpha=alpha, c=c)
+    if sweep is None:
         return CHECKPOINT_DIR / f"seed{seed}"
-    return CACHE / alpha_tag(alpha) / "checkpoints" / f"seed{seed}"
+    return sweep / "checkpoints" / f"seed{seed}"
 
 
 def mse_vs_teacher(pred: torch.Tensor, x: torch.Tensor) -> float:
@@ -401,23 +444,24 @@ def _init_cache_matches(state: dict, init_seed: int) -> bool:
     if INIT_MODE == "gaussian":
         return (
             state.get("init_seed") == init_seed
-            and state.get("init_mean") == INIT_MEAN
-            and state.get("init_var") == INIT_VAR
+            and float(state.get("init_mean", 0.0)) == float(INIT_MEAN)
+            and float(state.get("init_var", 0.0)) == float(INIT_VAR)
         )
     if INIT_MODE == "manual":
         return (
             state.get("init_seed") == init_seed
-            and state.get("init_manual_noise_var") == INIT_MANUAL_NOISE_VAR
+            and float(state.get("init_manual_noise_var", 0.0))
+            == float(INIT_MANUAL_NOISE_VAR)
             and torch.allclose(state["W"], make_init_W(N, DIMENSION, init_seed))
         )
     return False
 
 
-def ensure_init_weights(init_seed: int) -> Path:
+def ensure_init_weights(init_seed: int, c: float | None = None) -> Path:
     """Cache init weights for this seed (Gaussian or manual)."""
-    path = init_weights_path(init_seed)
+    path = init_weights_path(init_seed, c=c)
     if path.exists():
-        state = torch.load(path, weights_only=True)
+        state = load_local_checkpoint(path)
         if _init_cache_matches(state, init_seed):
             return path
         print(f"Regenerating init weights for seed {init_seed} (cached init mismatch)")
@@ -430,15 +474,15 @@ def ensure_init_weights(init_seed: int) -> Path:
         payload.update(
             {
                 "init_seed": init_seed,
-                "init_mean": INIT_MEAN,
-                "init_var": INIT_VAR,
+                "init_mean": float(INIT_MEAN),
+                "init_var": float(INIT_VAR),
             }
         )
     if INIT_MODE == "manual":
         payload.update(
             {
                 "init_seed": init_seed,
-                "init_manual_noise_var": INIT_MANUAL_NOISE_VAR,
+                "init_manual_noise_var": float(INIT_MANUAL_NOISE_VAR),
             }
         )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -458,12 +502,15 @@ def make_optimizer(
 
 
 def resolve_checkpoint(
-    load_from: str | Path | None, init_seed: int, alpha: float | None = None
+    load_from: str | Path | None,
+    init_seed: int,
+    alpha: float | None = None,
+    c: float | None = None,
 ) -> Path:
     if load_from is None:
-        return ensure_init_weights(init_seed)
+        return ensure_init_weights(init_seed, c=c)
     if load_from == "trained":
-        return trained_weights_path(init_seed, alpha=alpha)
+        return trained_weights_path(init_seed, alpha=alpha, c=c)
     return Path(load_from)
 
 
@@ -471,13 +518,14 @@ def load_student(
     init_seed: int,
     load_from: str | Path | None,
     alpha: float | None = None,
+    c: float | None = None,
 ) -> tuple[CommitteeStudent, Path]:
-    ensure_init_weights(init_seed)
+    ensure_init_weights(init_seed, c=c)
     student = CommitteeStudent(DIMENSION, N, init_seed)
-    path = resolve_checkpoint(load_from, init_seed, alpha=alpha)
+    path = resolve_checkpoint(load_from, init_seed, alpha=alpha, c=c)
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
-    state = torch.load(path, weights_only=True)
+    state = load_local_checkpoint(path)
     if "init_mode" in state or "init_seed" in state:
         student.load_state_dict({"W": state["W"]})
     else:
@@ -487,10 +535,16 @@ def load_student(
 
 
 def checkpoint_path(
-    seed: int, epoch: int, alpha: float | None = None
+    seed: int,
+    epoch: int,
+    alpha: float | None = None,
+    c: float | None = None,
 ) -> Path:
     """Path for a 1-indexed training epoch checkpoint."""
-    return seed_checkpoint_dir(seed, alpha=alpha) / f"student_epoch_{epoch:06d}.pt"
+    return (
+        seed_checkpoint_dir(seed, alpha=alpha, c=c)
+        / f"student_epoch_{epoch:06d}.pt"
+    )
 
 
 def save_student_checkpoint(
@@ -499,9 +553,10 @@ def save_student_checkpoint(
     epoch: int,
     path: Path | None = None,
     alpha: float | None = None,
+    c: float | None = None,
 ) -> Path:
     """Save student weights at the given 1-indexed epoch."""
-    path = path or checkpoint_path(seed, epoch, alpha=alpha)
+    path = path or checkpoint_path(seed, epoch, alpha=alpha, c=c)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(student.state_dict(), path)
     print(f"Saved checkpoint at epoch {epoch} to {path}")
@@ -519,41 +574,45 @@ def train_one_seed(
     ensemble_size: int,
     load_from: str | Path | None,
     alpha: float | None = None,
+    c: float | None = None,
     log_every: int = 1,
 ) -> None:
     run_alpha = ALPHA if alpha is None else alpha
     run_p, run_n_test = (
         (P, N_TEST_USED) if alpha is None else compute_sample_counts(run_alpha)
     )
+    run_noise_var = INIT_MANUAL_NOISE_VAR if c is None else c / DIMENSION
 
-    plot_dir = seed_plot_dir(seed, alpha=alpha)
+    plot_dir = seed_plot_dir(seed, alpha=alpha, c=c)
     loss_loglog_path = plot_dir / "loss_loglog.png"
     pred_vs_theory_path = plot_dir / "pred_vs_theory.png"
     theory_curves_path = plot_dir / "theory_curves.png"
     weight_dist_path = plot_dir / "weights_distribution.png"
-    trained_path = trained_weights_path(seed, alpha=alpha)
+    trained_path = trained_weights_path(seed, alpha=alpha, c=c)
 
-    student, loaded_from = load_student(seed, load_from, alpha=alpha)
+    student, loaded_from = load_student(seed, load_from, alpha=alpha, c=c)
 
     student.eval()
     with torch.no_grad():
         x_grid = make_theory_grid()
         y_student_init = student(x_grid)
         init_grid_mse = mse_vs_teacher(y_student_init, x_grid)
-    seed_label = (
-        f"alpha {run_alpha:.2f} seed {seed}"
-        if alpha is not None
-        else f"seed {seed}"
-    )
+    if c is not None:
+        seed_label = f"C {c:.2f} seed {seed}"
+    elif alpha is not None:
+        seed_label = f"alpha {run_alpha:.2f} seed {seed}"
+    else:
+        seed_label = f"seed {seed}"
     print(f"[{seed_label}] init_grid_mse={init_grid_mse:.6f}")
 
     w_init = student_hidden_weights(student).clone()
 
-    run_name = (
-        f"alpha_{run_alpha:.2f}_seed_{seed}"
-        if alpha is not None
-        else f"seed_{seed}"
-    )
+    if c is not None:
+        run_name = f"c_{c:.2f}_seed_{seed}"
+    elif alpha is not None:
+        run_name = f"alpha_{run_alpha:.2f}_seed_{seed}"
+    else:
+        run_name = f"seed_{seed}"
     wandb.init(
         project="committee-student",
         group=group,
@@ -578,7 +637,8 @@ def train_one_seed(
             "init_var": INIT_VAR,
             "init_mode": INIT_MODE,
             "init_w_manual": INIT_W_MANUAL,
-            "init_manual_noise_var": INIT_MANUAL_NOISE_VAR,
+            "C": c,
+            "init_manual_noise_var": run_noise_var,
             "loaded_from": str(loaded_from),
             "save_epochs": SAVE_EPOCHS,
             "grok_train_thresh": GROK_TRAIN_THRESH,
@@ -625,7 +685,7 @@ def train_one_seed(
         epoch_num = epoch + 1
 
         if epoch_num in save_epochs:
-            save_student_checkpoint(student, seed, epoch_num, alpha=alpha)
+            save_student_checkpoint(student, seed, epoch_num, alpha=alpha, c=c)
 
         if epoch_num % 1000 == 0:
             print(
