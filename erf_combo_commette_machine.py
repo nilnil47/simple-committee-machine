@@ -28,7 +28,7 @@ from committee_network import (
 )
 
 LR = 5e-4
-EPOCHS = 20_000
+EPOCHS = 10_000
 
 # Optimizer: "adam" or "gd" (plain gradient descent, no momentum)
 OPTIMIZER = "adam"
@@ -576,7 +576,7 @@ def train_one_seed(
     alpha: float | None = None,
     c: float | None = None,
     log_every: int = 1,
-) -> None:
+) -> float:
     run_alpha = ALPHA if alpha is None else alpha
     run_p, run_n_test = (
         (P, N_TEST_USED) if alpha is None else compute_sample_counts(run_alpha)
@@ -750,6 +750,7 @@ def train_one_seed(
         }
     )
     wandb.finish()
+    return float(grok_metrics["final_test_loss"])
 
 
 if __name__ == "__main__":

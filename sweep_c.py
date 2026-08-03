@@ -7,13 +7,16 @@ import os
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 from committee_network import teacher_erf_combo
 from erf_combo_commette_machine import (
     ALPHA,
+    CACHE,
     LOAD_FROM,
     P,
     N_TEST_USED,
@@ -40,8 +43,11 @@ def build_c_list(
     return [round(c, 2) for c in np.arange(start, stop + 1e-9, step)]
 
 
-def _train_c(c: float, log_every: int, use_wandb: bool) -> float:
-    """Train all ensemble seeds for one C value. Returns C on success."""
+def _train_c(c: float, log_every: int, use_wandb: bool) -> tuple[float, float]:
+    """Train all ensemble seeds for one C value.
+
+    Returns (C, mean final test loss) on success.
+    """
     torch.set_num_threads(1)
 
     import erf_combo_commette_machine as harness
@@ -64,8 +70,9 @@ def _train_c(c: float, log_every: int, use_wandb: bool) -> float:
         f"{len(seeds)} seed(s), load_from={load_from!r}"
     )
 
+    final_test_losses: list[float] = []
     for seed in seeds:
-        train_one_seed(
+        final_test_loss = train_one_seed(
             seed,
             x_train,
             y_train,
@@ -77,8 +84,32 @@ def _train_c(c: float, log_every: int, use_wandb: bool) -> float:
             c=c,
             log_every=log_every,
         )
+        final_test_losses.append(final_test_loss)
 
-    return c
+    mean_final_test_loss = float(np.mean(final_test_losses))
+    return c, mean_final_test_loss
+
+
+def save_final_test_loss_vs_c_plot(
+    results: list[tuple[float, float]],
+    path: Path,
+) -> Path:
+    """Plot final test loss as a function of C."""
+    results = sorted(results, key=lambda item: item[0])
+    cs = [c for c, _ in results]
+    losses = [loss for _, loss in results]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(cs, losses, marker="o", linewidth=1.5)
+    ax.set_xlabel("C")
+    ax.set_ylabel("final test loss")
+    ax.set_title(f"Final test loss vs C (alpha={ALPHA:.2f})")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
 
 
 def parse_args() -> argparse.Namespace:
@@ -125,7 +156,7 @@ def main() -> None:
     ensure_data_cache()
 
     started = time.monotonic()
-    completed: list[float] = []
+    results: list[tuple[float, float]] = []
     failed: dict[float, str] = {}
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -135,9 +166,12 @@ def main() -> None:
         for future in as_completed(futures):
             c = futures[future]
             try:
-                done_c = future.result()
-                completed.append(done_c)
-                print(f"[done] C={done_c:.2f} ({len(completed)}/{len(c_values)})")
+                done_c, final_test_loss = future.result()
+                results.append((done_c, final_test_loss))
+                print(
+                    f"[done] C={done_c:.2f} final_test_loss={final_test_loss:.6f} "
+                    f"({len(results)}/{len(c_values)})"
+                )
             except Exception:
                 failed[c] = traceback.format_exc()
                 print(f"[failed] C={c:.2f}\n{failed[c]}")
@@ -145,12 +179,19 @@ def main() -> None:
     elapsed = time.monotonic() - started
     print(
         f"\nSweep finished in {elapsed:.1f}s: "
-        f"{len(completed)} completed, {len(failed)} failed"
+        f"{len(results)} completed, {len(failed)} failed"
     )
     if failed:
         print("Failed C values:")
         for c in sorted(failed):
             print(f"  C={c:.2f}")
+
+    if results:
+        plot_path = save_final_test_loss_vs_c_plot(
+            results,
+            CACHE / "plots" / "final_test_loss_vs_c.png",
+        )
+        print(f"Saved final test loss vs C plot to {plot_path}")
 
 
 if __name__ == "__main__":
