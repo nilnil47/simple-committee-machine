@@ -38,6 +38,7 @@ from erf_combo_commette_machine import (
     OPTIMIZER,
     P,
     SEED,
+    WEIGHT_DECAY,
     data_cache_valid,
     load_student,
     make_optimizer,
@@ -490,6 +491,7 @@ def init_wandb(loaded_from: Path) -> None:
             "student": "(1/sqrt(N)) sum_p erf(w_p·x)",
             "lr": LR,
             "optimizer": OPTIMIZER,
+            "weight_decay": WEIGHT_DECAY,
             "max_epochs": MAX_EPOCHS,
             "epochs_per_ui_tick": EPOCHS_PER_UI_TICK,
             "n_test_used": N_TEST_USED,
@@ -635,7 +637,7 @@ def main() -> None:
 
     init_wandb(loaded_from)
 
-    optimizer = make_optimizer(student.parameters(), LR, OPTIMIZER)
+    optimizer = make_optimizer(student.parameters(), LR, OPTIMIZER, WEIGHT_DECAY)
     loss_fn = nn.MSELoss()
     state = TrainingState(paused=PAUSE_ON_START)
 

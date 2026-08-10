@@ -24,3 +24,4 @@ connect_lab.sh
 *.png
 simple-committee-machine/**/*.png
 simple-committee-machine/**/*.pt
+git_acess_token

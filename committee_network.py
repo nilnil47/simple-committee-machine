@@ -28,8 +28,8 @@ INIT_MEAN = 0.0
 INIT_VAR = 1.0 / DIMENSION  # std = sqrt(INIT_VAR); use a small value for a narrow init
 
 # Init mode: "gaussian" or "manual"
-# INIT_MODE = "gaussian"
-INIT_MODE = "manual"
+INIT_MODE = "gaussian"
+# INIT_MODE = "manual"
 
 # Manual init: one entry per hidden unit (length N).
 # With scale 1/sqrt(N), sqrt(N) units at w=1 and 2*sqrt(N) at w=-1/2

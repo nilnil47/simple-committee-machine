@@ -28,12 +28,14 @@ from committee_network import (
 )
 
 LR = 5e-4
-EPOCHS = 10_000
+EPOCHS = 20_000
 
 # Optimizer: "adam" or "gd" (plain gradient descent, no momentum)
-OPTIMIZER = "adam"
-# OPTIMIZER = "gd"
-SEED = 43
+# OPTIMIZER = "adam"
+OPTIMIZER = "gd"
+# L2 weight decay passed to Adam / SGD (GD)
+WEIGHT_DECAY = 0.0
+SEED = 44
 # Number of networks in the ensemble (seeds INIT_SEED .. INIT_SEED + ENSEMBLE_SIZE - 1).
 # Set to 1 for a single run. Ignored if ENSEMBLE_SEEDS is set explicitly.
 ENSEMBLE_SIZE = 1
@@ -73,6 +75,10 @@ def c_tag(c: float) -> str:
     return f"c{c:.2f}"
 
 
+def wd_tag(weight_decay: float) -> str:
+    return f"wd{weight_decay:.4g}"
+
+
 def apply_manual_noise_c(c: float) -> float:
     """Set INIT_MANUAL_NOISE_VAR = C / DIMENSION in committee_network and this module."""
     import committee_network as cn
@@ -84,11 +90,17 @@ def apply_manual_noise_c(c: float) -> float:
     return noise_var
 
 
-def _sweep_subdir(alpha: float | None = None, c: float | None = None) -> Path | None:
+def _sweep_subdir(
+    alpha: float | None = None,
+    c: float | None = None,
+    weight_decay: float | None = None,
+) -> Path | None:
     if alpha is not None:
         return CACHE / alpha_tag(alpha)
     if c is not None:
         return CACHE / c_tag(c)
+    if weight_decay is not None:
+        return CACHE / wd_tag(weight_decay)
     return None
 
 
@@ -150,27 +162,36 @@ def init_weights_path(seed: int, c: float | None = None) -> Path:
 
 
 def trained_weights_path(
-    seed: int, alpha: float | None = None, c: float | None = None
+    seed: int,
+    alpha: float | None = None,
+    c: float | None = None,
+    weight_decay: float | None = None,
 ) -> Path:
-    sweep = _sweep_subdir(alpha=alpha, c=c)
+    sweep = _sweep_subdir(alpha=alpha, c=c, weight_decay=weight_decay)
     if sweep is None:
         return CACHE / f"student_trained_seed{seed}.pt"
     return sweep / f"student_trained_seed{seed}.pt"
 
 
 def seed_plot_dir(
-    seed: int, alpha: float | None = None, c: float | None = None
+    seed: int,
+    alpha: float | None = None,
+    c: float | None = None,
+    weight_decay: float | None = None,
 ) -> Path:
-    sweep = _sweep_subdir(alpha=alpha, c=c)
+    sweep = _sweep_subdir(alpha=alpha, c=c, weight_decay=weight_decay)
     if sweep is None:
         return CACHE / "plots" / f"seed{seed}"
     return sweep / "plots" / f"seed{seed}"
 
 
 def seed_checkpoint_dir(
-    seed: int, alpha: float | None = None, c: float | None = None
+    seed: int,
+    alpha: float | None = None,
+    c: float | None = None,
+    weight_decay: float | None = None,
 ) -> Path:
-    sweep = _sweep_subdir(alpha=alpha, c=c)
+    sweep = _sweep_subdir(alpha=alpha, c=c, weight_decay=weight_decay)
     if sweep is None:
         return CHECKPOINT_DIR / f"seed{seed}"
     return sweep / "checkpoints" / f"seed{seed}"
@@ -492,12 +513,15 @@ def ensure_init_weights(init_seed: int, c: float | None = None) -> Path:
 
 
 def make_optimizer(
-    params, lr: float, optimizer: str = OPTIMIZER
+    params,
+    lr: float,
+    optimizer: str = OPTIMIZER,
+    weight_decay: float = WEIGHT_DECAY,
 ) -> optim.Optimizer:
     if optimizer == "adam":
-        return optim.Adam(params, lr=lr)
+        return optim.Adam(params, lr=lr, weight_decay=weight_decay)
     if optimizer == "gd":
-        return optim.SGD(params, lr=lr)
+        return optim.SGD(params, lr=lr, weight_decay=weight_decay)
     raise ValueError(f"Unknown OPTIMIZER: {optimizer!r} (use 'adam' or 'gd')")
 
 
@@ -506,11 +530,14 @@ def resolve_checkpoint(
     init_seed: int,
     alpha: float | None = None,
     c: float | None = None,
+    weight_decay: float | None = None,
 ) -> Path:
     if load_from is None:
         return ensure_init_weights(init_seed, c=c)
     if load_from == "trained":
-        return trained_weights_path(init_seed, alpha=alpha, c=c)
+        return trained_weights_path(
+            init_seed, alpha=alpha, c=c, weight_decay=weight_decay
+        )
     return Path(load_from)
 
 
@@ -519,10 +546,13 @@ def load_student(
     load_from: str | Path | None,
     alpha: float | None = None,
     c: float | None = None,
+    weight_decay: float | None = None,
 ) -> tuple[CommitteeStudent, Path]:
     ensure_init_weights(init_seed, c=c)
     student = CommitteeStudent(DIMENSION, N, init_seed)
-    path = resolve_checkpoint(load_from, init_seed, alpha=alpha, c=c)
+    path = resolve_checkpoint(
+        load_from, init_seed, alpha=alpha, c=c, weight_decay=weight_decay
+    )
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
     state = load_local_checkpoint(path)
@@ -539,10 +569,11 @@ def checkpoint_path(
     epoch: int,
     alpha: float | None = None,
     c: float | None = None,
+    weight_decay: float | None = None,
 ) -> Path:
     """Path for a 1-indexed training epoch checkpoint."""
     return (
-        seed_checkpoint_dir(seed, alpha=alpha, c=c)
+        seed_checkpoint_dir(seed, alpha=alpha, c=c, weight_decay=weight_decay)
         / f"student_epoch_{epoch:06d}.pt"
     )
 
@@ -554,9 +585,12 @@ def save_student_checkpoint(
     path: Path | None = None,
     alpha: float | None = None,
     c: float | None = None,
+    weight_decay: float | None = None,
 ) -> Path:
     """Save student weights at the given 1-indexed epoch."""
-    path = path or checkpoint_path(seed, epoch, alpha=alpha, c=c)
+    path = path or checkpoint_path(
+        seed, epoch, alpha=alpha, c=c, weight_decay=weight_decay
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(student.state_dict(), path)
     print(f"Saved checkpoint at epoch {epoch} to {path}")
@@ -575,6 +609,7 @@ def train_one_seed(
     load_from: str | Path | None,
     alpha: float | None = None,
     c: float | None = None,
+    weight_decay: float | None = None,
     log_every: int = 1,
 ) -> float:
     run_alpha = ALPHA if alpha is None else alpha
@@ -582,22 +617,29 @@ def train_one_seed(
         (P, N_TEST_USED) if alpha is None else compute_sample_counts(run_alpha)
     )
     run_noise_var = INIT_MANUAL_NOISE_VAR if c is None else c / DIMENSION
+    run_weight_decay = WEIGHT_DECAY if weight_decay is None else weight_decay
 
-    plot_dir = seed_plot_dir(seed, alpha=alpha, c=c)
+    plot_dir = seed_plot_dir(seed, alpha=alpha, c=c, weight_decay=weight_decay)
     loss_loglog_path = plot_dir / "loss_loglog.png"
     pred_vs_theory_path = plot_dir / "pred_vs_theory.png"
     theory_curves_path = plot_dir / "theory_curves.png"
     weight_dist_path = plot_dir / "weights_distribution.png"
-    trained_path = trained_weights_path(seed, alpha=alpha, c=c)
+    trained_path = trained_weights_path(
+        seed, alpha=alpha, c=c, weight_decay=weight_decay
+    )
 
-    student, loaded_from = load_student(seed, load_from, alpha=alpha, c=c)
+    student, loaded_from = load_student(
+        seed, load_from, alpha=alpha, c=c, weight_decay=weight_decay
+    )
 
     student.eval()
     with torch.no_grad():
         x_grid = make_theory_grid()
         y_student_init = student(x_grid)
         init_grid_mse = mse_vs_teacher(y_student_init, x_grid)
-    if c is not None:
+    if weight_decay is not None:
+        seed_label = f"wd {run_weight_decay:.4g} seed {seed}"
+    elif c is not None:
         seed_label = f"C {c:.2f} seed {seed}"
     elif alpha is not None:
         seed_label = f"alpha {run_alpha:.2f} seed {seed}"
@@ -607,7 +649,9 @@ def train_one_seed(
 
     w_init = student_hidden_weights(student).clone()
 
-    if c is not None:
+    if weight_decay is not None:
+        run_name = f"wd_{run_weight_decay:.4g}_seed_{seed}"
+    elif c is not None:
         run_name = f"c_{c:.2f}_seed_{seed}"
     elif alpha is not None:
         run_name = f"alpha_{run_alpha:.2f}_seed_{seed}"
@@ -628,6 +672,7 @@ def train_one_seed(
             "student": "(1/sqrt(N)) sum_p erf(w_p·x)",
             "lr": LR,
             "optimizer": OPTIMIZER,
+            "weight_decay": run_weight_decay,
             "epochs": EPOCHS,
             "n_test_used": run_n_test,
             "init_seed": seed,
@@ -652,7 +697,9 @@ def train_one_seed(
     wandb.define_metric("loss", step_metric="epoch")
     wandb.define_metric("grad_norm", step_metric="epoch")
     save_epochs = set(SAVE_EPOCHS or ())
-    optimizer = make_optimizer(student.parameters(), LR)
+    optimizer = make_optimizer(
+        student.parameters(), LR, weight_decay=run_weight_decay
+    )
     loss_fn = nn.MSELoss()
     epochs_hist: list[int] = []
     train_loss_hist: list[float] = []
@@ -685,7 +732,14 @@ def train_one_seed(
         epoch_num = epoch + 1
 
         if epoch_num in save_epochs:
-            save_student_checkpoint(student, seed, epoch_num, alpha=alpha, c=c)
+            save_student_checkpoint(
+                student,
+                seed,
+                epoch_num,
+                alpha=alpha,
+                c=c,
+                weight_decay=weight_decay,
+            )
 
         if epoch_num % 1000 == 0:
             print(
